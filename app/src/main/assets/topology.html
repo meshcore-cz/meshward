@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    #graph { width: 100vw; height: 100vh; }
+  </style>
+  <!-- Bundled locally in app assets — no network access. -->
+  <script src="force-graph.min.js"></script>
+</head>
+<body>
+  <div id="graph"></div>
+  <script>
+    // RSSI sentinel mirrors Kotlin RSSI_UNKNOWN (Int.MIN_VALUE) — any very-negative value.
+    var RSSI_UNKNOWN_MAX = -1000;
+    // A node not heard from within this window fades out. Mirrors ~3 announce intervals.
+    var STALE_MS = 45000;
+
+    var theme = {
+      node: '#8a8a8a',
+      primary: '#4db6ac',
+      text: '#cfcfcf',
+      link: '#6b6b6b',
+      linkStrong: '#9cc7c2'
+    };
+
+    // payload "now" anchored to a local clock so staleness keeps advancing between updates.
+    var payloadNow = Date.now();
+    var payloadAnchor = Date.now();
+    function effectiveNow() { return payloadNow + (Date.now() - payloadAnchor); }
+
+    var nodeById = {};
+
+    var Graph = ForceGraph()(document.getElementById('graph'))
+      .nodeId('id')
+      .nodeLabel(function (n) { return n.name || n.id.slice(0, 12); })
+      .nodeRelSize(5)
+      .linkColor(function (l) { return l.bidirectional ? theme.linkStrong : theme.link; })
+      .linkLineDash(function (l) { return l.bidirectional ? null : [4, 3]; })
+      .linkWidth(linkWidth)
+      .linkDirectionalArrowLength(function (l) { return l.bidirectional ? 0 : 4; })
+      .linkDirectionalArrowRelPos(0.85)
+      .onNodeClick(function (node) {
+        try { if (window.AndroidBridge && AndroidBridge.onNodeClick) AndroidBridge.onNodeClick(node.id); } catch (e) {}
+      })
+      .nodeCanvasObject(drawNode)
+      .nodePointerAreaPaint(paintNodeHit);
+
+    function linkWidth(l) {
+      if (l.rssi == null || l.rssi <= RSSI_UNKNOWN_MAX) return l.bidirectional ? 1.6 : 1.0;
+      // Stronger signal (closer to -40) renders thicker; weak (-100) renders thin.
+      var r = Math.max(-100, Math.min(-40, l.rssi));
+      return 1.2 + ((r + 100) / 60) * 3.0;
+    }
+
+    function isStale(node) {
+      if (node.isLocal) return false;
+      if (!node.lastSeenMs) return true;
+      return (effectiveNow() - node.lastSeenMs) > STALE_MS;
+    }
+
+    function drawNode(node, ctx, scale) {
+      var stale = isStale(node);
+      var r = node.isLocal ? 7 : 5;
+      ctx.globalAlpha = stale ? 0.3 : 1.0;
+
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+      ctx.fillStyle = node.isLocal ? theme.primary : theme.node;
+      ctx.fill();
+
+      if (node.isLocal) {
+        ctx.lineWidth = 2 / scale;
+        ctx.strokeStyle = theme.primary;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+
+      var label = node.name || node.id.slice(0, 8);
+      var fs = Math.max(3, 11 / scale);
+      ctx.font = fs + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = theme.text;
+      ctx.fillText(label, node.x, node.y + r + 1.5);
+
+      ctx.globalAlpha = 1.0;
+    }
+
+    function paintNodeHit(node, color, ctx) {
+      var r = node.isLocal ? 7 : 5;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+
+    // Called from Kotlin with the current Material colors so the graph matches the app theme.
+    window.setTheme = function (json) {
+      try {
+        var t = JSON.parse(json);
+        theme.node = t.node || theme.node;
+        theme.primary = t.primary || theme.primary;
+        theme.text = t.text || theme.text;
+        theme.link = t.link || theme.link;
+        theme.linkStrong = t.linkStrong || theme.linkStrong;
+      } catch (e) {}
+    };
+
+    // Called from Kotlin with the full topology snapshot. Node positions are preserved across
+    // updates by reusing existing node objects (their x/y/vx/vy survive Object.assign).
+    window.setGraph = function (json) {
+      var data = JSON.parse(json);
+      payloadNow = data.now || Date.now();
+      payloadAnchor = Date.now();
+
+      var incoming = {};
+      (data.nodes || []).forEach(function (n) {
+        incoming[n.id] = true;
+        var ex = nodeById[n.id];
+        if (ex) { ex.name = n.name; ex.isLocal = n.isLocal; ex.lastSeenMs = n.lastSeenMs; ex.neighborCount = n.neighborCount; }
+        else { nodeById[n.id] = n; }
+      });
+      Object.keys(nodeById).forEach(function (id) { if (!incoming[id]) delete nodeById[id]; });
+
+      var nodes = Object.keys(nodeById).map(function (id) { return nodeById[id]; });
+      // Fresh link objects each update (force-graph mutates source/target into node refs).
+      var links = (data.links || []).map(function (l) {
+        return { source: l.source, target: l.target, rssi: l.rssi, lastSeenMs: l.lastSeenMs, bidirectional: l.bidirectional };
+      });
+
+      Graph.graphData({ nodes: nodes, links: links });
+    };
+
+    function resize() {
+      Graph.width(window.innerWidth).height(window.innerHeight);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Re-render periodically so staleness fades advance even without new data.
+    setInterval(function () { if (Graph.graphData().nodes.length) Graph.nodeRelSize(5); }, 5000);
+
+    try { if (window.AndroidBridge && AndroidBridge.onReady) AndroidBridge.onReady(); } catch (e) {}
+  </script>
+</body>
+</html>

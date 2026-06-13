@@ -1,0 +1,27 @@
+# Gradle
+.gradle/
+build/
+captures/
+
+# Android build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Local config (machine-specific SDK path) - never commit
+local.properties
+
+# IntelliJ / Android Studio
+*.iml
+.idea/
+!.idea/.gitignore
+
+# Native build
+.externalNativeBuild/
+.cxx/
+
+# Keystores / secrets
+*.jks
+*.keystore
