@@ -1,7 +1,7 @@
 # Meshward
 
 <p align="center">
-  <img src="docs/assets/meshward-logo.png" width="150" alt="Meshward logo">
+  <img src="app/src/main/res/drawable-nodpi/meshward_logo.png" width="150" alt="Meshward logo">
 </p>
 
 <p align="center">
