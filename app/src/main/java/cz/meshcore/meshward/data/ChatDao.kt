@@ -142,4 +142,15 @@ interface ChatDao {
     /** Drops discovered contacts not heard from since [cutoffMs] (their TTL has elapsed). */
     @Query("DELETE FROM discovered_contacts WHERE lastAdvertisedMs < :cutoffMs")
     suspend fun pruneDiscovered(cutoffMs: Long)
+
+    // ---- node announcements (latest ANNOUNCE/ADVERT per node, persisted for the profile) ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAnnouncement(announcement: NodeAnnouncement)
+
+    @Query("SELECT * FROM node_announcements WHERE nodeHex = :nodeHex")
+    fun announcementsForNode(nodeHex: String): Flow<List<NodeAnnouncement>>
+
+    /** The current receipt time we have stored for this node/source, or null (to only upsert newer). */
+    @Query("SELECT timestampMs FROM node_announcements WHERE nodeHex = :nodeHex AND source = :source LIMIT 1")
+    suspend fun announcementTimestamp(nodeHex: String, source: String): Long?
 }

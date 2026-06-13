@@ -48,6 +48,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.sidepath.meshcore.MeshCoreEnvelope
 import cz.meshcore.sidepath.meshcore.MeshCorePacket
@@ -124,6 +126,10 @@ fun MeshCoreRxLogScreen(vm: ChatViewModel, onBack: () -> Unit, onOpenProfile: (S
 }
 
 private val mcTimeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+/** MeshCore packet tool; raw OTA bytes ('+'-separated hex) are appended as the `d_packet` query. */
+private const val MESHCORE_PACKET_TOOL_URL =
+    "https://meshcore-cz.github.io/meshcore-packet-tool/?d_packet="
 
 @Composable
 private fun MeshCoreRow(p: MeshCorePacket, nowMs: Long, onClick: () -> Unit) {
@@ -246,11 +252,30 @@ internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismis
         value = vm.meshContentHash(p.raw)
     }
     var showAnalyzerChooser by remember { mutableStateOf(false) }
+    var showPath by remember { mutableStateOf(false) }
     fun openAnalyzer(base: String) {
         val hash = contentHash ?: return
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(base + hash)))
         }
+    }
+    // Opens the raw OTA bytes in the MeshCore packet tool (bytes are '+'-separated hex).
+    fun openPacketTool() {
+        val d = p.raw.joinToString("+") { "%02x".format(it.toInt() and 0xFF) }
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(MESHCORE_PACKET_TOOL_URL + d)))
+        }
+    }
+
+    val pathHops = p.envelope?.hops?.map { it.toHexLower() }.orEmpty()
+    if (showPath) {
+        MeshCorePacketPathDialog(
+            hops = pathHops,
+            routeLabel = p.envelope?.let { routeLabel(it) }.orEmpty(),
+            pathHashSize = p.envelope?.pathHashSize ?: 0,
+            vm = vm,
+            onDismiss = { showPath = false },
+        )
     }
 
     if (showAnalyzerChooser) {
@@ -312,10 +337,67 @@ internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismis
                 })
 
                 Spacer(Modifier.width(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { openPacketTool() }) { Text("Packet tool") }
+                    OutlinedButton(enabled = pathHops.isNotEmpty(), onClick = { showPath = true }) { Text("View path") }
+                }
+
+                Spacer(Modifier.width(4.dp))
                 RawPacketView("Raw MeshCore packet", p.raw)
             }
         },
     )
+}
+
+/**
+ * Full-screen "View MeshCore Path" for a single MeshCore packet: each envelope hop (a path-hash
+ * prefix) resolved to the node(s) it could be, reusing [PathHopRow]. Mirrors the heard-based
+ * [MeshCorePathDialog] but renders from the packet's decoded path rather than a persisted heard.
+ */
+@Composable
+private fun MeshCorePacketPathDialog(
+    hops: List<String>,
+    routeLabel: String,
+    pathHashSize: Int,
+    vm: ChatViewModel,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxSize()) {
+                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    Column {
+                        Text("View MeshCore Path", style = MaterialTheme.typography.titleLarge)
+                        val label = buildString {
+                            append("${hops.size} hop${if (hops.size == 1) "" else "s"}")
+                            if (routeLabel.isNotBlank()) append(" · $routeLabel")
+                            if (pathHashSize > 0) append(" · $pathHashSize-byte hash")
+                        }
+                        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Column(
+                    Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    if (hops.isEmpty()) {
+                        Text(
+                            "This packet carries no recorded path hops.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        hops.forEachIndexed { i, hex ->
+                            PathHopRow(hex, i + 1, vm.meshCoreHopCandidates(hex))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

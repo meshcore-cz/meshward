@@ -45,7 +45,7 @@ import java.security.SecureRandom
 fun JoinChannelSheet(
     vm: ChatViewModel,
     showPublic: Boolean,
-    onJoined: () -> Unit,
+    onJoined: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var namedName by remember { mutableStateOf("") }
@@ -89,7 +89,7 @@ fun JoinChannelSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(onClick = { vm.joinPublic(); onJoined() }, modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onJoined(vm.joinPublic()) }, modifier = Modifier.fillMaxWidth()) {
                     Text("Join Public")
                 }
                 HorizontalDivider()
@@ -116,7 +116,7 @@ fun JoinChannelSheet(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedButton(
-                onClick = { vm.joinNamedChannel(namedName); onJoined() },
+                onClick = { vm.joinNamedChannel(namedName)?.let(onJoined) },
                 enabled = namedName.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Join named channel") }
@@ -168,7 +168,7 @@ fun JoinChannelSheet(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedButton(
-                onClick = { vm.joinSecretChannel(secretName, secretValue); onJoined() },
+                onClick = { vm.joinSecretChannel(secretName, secretValue)?.let(onJoined) },
                 enabled = secretValid,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Join secret channel") }

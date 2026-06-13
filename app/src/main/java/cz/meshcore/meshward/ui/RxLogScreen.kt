@@ -23,12 +23,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.UnfoldLess
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,6 +84,18 @@ fun RxLogScreen(
         }
     }
     var detail by remember { mutableStateOf<RxPacket?>(null) }
+    // Grouped collapses re-receptions of the same datagram (matched by id) into one row with a
+    // ×count badge; ungrouped lists every reception so each packet can be inspected on its own.
+    var grouped by rememberSaveable { mutableStateOf(false) }
+    val display = remember(packets, grouped) {
+        if (!grouped) {
+            packets.map { it to 1 }
+        } else {
+            val byId = LinkedHashMap<String, MutableList<RxPacket>>()
+            packets.forEach { byId.getOrPut(it.id.toHexLower()) { mutableListOf() }.add(it) }
+            byId.values.map { it.first() to it.size }
+        }
+    }
     // The Rx Log is newest-first; always jump back to the newest entry when re-entering the screen
     // (the saveable-state holder would otherwise restore the previous scroll position).
     val listState = rememberLazyListState()
@@ -107,6 +123,12 @@ fun RxLogScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { grouped = !grouped }) {
+                        Icon(
+                            if (grouped) Icons.Default.UnfoldMore else Icons.Default.UnfoldLess,
+                            contentDescription = if (grouped) "Ungroup packets" else "Group duplicate packets",
+                        )
+                    }
                     IconButton(onClick = onOpenMeshCoreLog) {
                         Icon(Icons.Default.Hub, contentDescription = "MeshCore log")
                     }
@@ -121,12 +143,13 @@ fun RxLogScreen(
             }
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(padding), state = listState) {
-                items(packets) { p ->
+                items(display) { (p, count) ->
                     PacketRow(
                         p = p,
                         vm = vm,
                         myNodeHex = myNode.toHex(),
                         nowMs = nowMs,
+                        count = count,
                     ) { detail = p }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 }
@@ -156,6 +179,7 @@ private fun PacketRow(
     vm: ChatViewModel,
     myNodeHex: String,
     nowMs: Long,
+    count: Int = 1,
     onClick: () -> Unit,
 ) {
     val ageMs = (nowMs - p.timestampMs).coerceAtLeast(0)
@@ -178,6 +202,7 @@ private fun PacketRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 TypePill(p)
+                if (count > 1) CountChip(count)
                 if (isMine) MineChip()
                 p.droppedReason?.let { DropChip(it) }
                 Text(timeFmt.format(Date(p.timestampMs)), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
@@ -195,6 +220,7 @@ private fun PacketRow(
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TypePill(p)
+                    if (count > 1) CountChip(count)
                     if (isMine) MineChip()
                     p.droppedReason?.let { DropChip(it) }
                     Text(
@@ -252,6 +278,21 @@ private fun DropChip(reason: String) {
             style = MaterialTheme.typography.labelSmall,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/** A "×N" badge shown on a grouped row, counting how many receptions of the datagram collapsed into it. */
+@Composable
+private fun CountChip(count: Int) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(6.dp)) {
+        Text(
+            "×$count",
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
     }
@@ -356,6 +397,18 @@ internal fun PacketDetailDialog(
     val sourceHex = p.source.toHex()
     val profile by remember(sourceHex) { vm.profileFor(sourceHex) }.collectAsState()
     val peer = peers.firstOrNull { it.nodeId.toHex() == sourceHex }
+    // For a MeshCore-carrier datagram, find the decoded inner packet (same datagram id) so we can
+    // drill into its MeshCore detail. Trimmed buffer → may be absent, in which case the button hides.
+    val meshPackets by vm.meshCorePackets.collectAsState()
+    val meshPacket = remember(p, meshPackets) {
+        if (p.protocol == PayloadProtocol.MESHCORE_PACKET)
+            meshPackets.firstOrNull { it.datagramId.toHexLower() == p.id.toHexLower() }
+        else null
+    }
+    var showMesh by remember { mutableStateOf(false) }
+    if (showMesh && meshPacket != null) {
+        MeshCoreDetailDialog(meshPacket, vm, onDismiss = { showMesh = false })
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
@@ -364,6 +417,12 @@ internal fun PacketDetailDialog(
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (shouldShowProfile(profile, peer)) {
                     PeerProfileBox(profile, peer) { onOpenProfile(sourceHex) }
+                    Spacer(Modifier.width(4.dp))
+                }
+                if (meshPacket != null) {
+                    OutlinedButton(onClick = { showMesh = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("MeshCore packet detail")
+                    }
                     Spacer(Modifier.width(4.dp))
                 }
                 Field("Time", timeFmt.format(Date(p.timestampMs)))

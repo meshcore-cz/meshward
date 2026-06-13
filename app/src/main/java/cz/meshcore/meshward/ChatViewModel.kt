@@ -1,13 +1,20 @@
 package cz.meshcore.meshward
 
+import android.Manifest
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationManager
 import android.os.IBinder
+import androidx.core.content.ContextCompat
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -74,6 +81,12 @@ private val PHY_MODE_KEY = stringPreferencesKey("phy_mode")
 private val AVATAR_STYLE_KEY = stringPreferencesKey("avatar_style")
 private val THEME_KEY = stringPreferencesKey("theme_mode")
 private val ANALYZER_URLS_KEY = stringPreferencesKey("analyzer_urls") // newline-separated base URLs
+// Location is opt-in and only used locally to compute distances to nodes that advertise GPS.
+private val LOCATION_ENABLED_KEY = booleanPreferencesKey("location_enabled")
+private val LOCATION_PROMPT_DISMISSED_KEY = booleanPreferencesKey("location_prompt_dismissed")
+private val LOCATION_LAT_KEY = doublePreferencesKey("location_lat")
+private val LOCATION_LON_KEY = doublePreferencesKey("location_lon")
+private val LOCATION_PRECISION_KEY = stringPreferencesKey("location_precision")
 
 /** Default MeshCore packet analyzer base URL; the content hash is appended. */
 const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
@@ -100,6 +113,19 @@ enum class ThemeMode(val value: String) {
 
     companion object {
         fun fromValue(v: String?) = entries.firstOrNull { it.value == v } ?: AUTO
+    }
+}
+
+/**
+ * How precisely we read this device's own location for distance estimates. [decimals] is how many
+ * fractional digits we keep (and the runtime permission it needs): COARSE rounds to ~110 m
+ * (ACCESS_COARSE_LOCATION), FINE keeps full precision (ACCESS_FINE_LOCATION).
+ */
+enum class LocationPrecision(val value: String, val decimals: Int) {
+    COARSE("coarse", 3), FINE("fine", 6);
+
+    companion object {
+        fun fromValue(v: String?) = entries.firstOrNull { it.value == v } ?: COARSE
     }
 }
 
@@ -176,6 +202,9 @@ data class ProfileInfo(
     val sigVerified: Boolean = false,
     val nodeAdvertisedMs: Long = 0L,
 )
+
+/** Our own approximate location, used only on-device to estimate distances to GPS-bearing nodes. */
+data class UserLocation(val lat: Double, val lon: Double)
 
 /**
  * A unified row in the merged Chats list — a direct conversation or a channel. [isChannel]
@@ -269,6 +298,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _themeMode = MutableStateFlow(ThemeMode.AUTO)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    // ---- approximate location (opt-in, on-device only) -----------------------
+    // [locationEnabled] = the user opted into distance estimates. [locationPromptDismissed] = the
+    // Explore opt-in banner has been answered (allowed or denied) so it stops showing. [userLocation]
+    // = our last cached approximate position, or null until we have one.
+    private val _locationEnabled = MutableStateFlow(false)
+    val locationEnabled: StateFlow<Boolean> = _locationEnabled.asStateFlow()
+
+    private val _locationPromptDismissed = MutableStateFlow(false)
+    val locationPromptDismissed: StateFlow<Boolean> = _locationPromptDismissed.asStateFlow()
+
+    private val _userLocation = MutableStateFlow<UserLocation?>(null)
+    val userLocation: StateFlow<UserLocation?> = _userLocation.asStateFlow()
+
+    private val _locationPrecision = MutableStateFlow(LocationPrecision.COARSE)
+    val locationPrecision: StateFlow<LocationPrecision> = _locationPrecision.asStateFlow()
 
     private val _trace = MutableStateFlow<TraceUi?>(null)
     val trace: StateFlow<TraceUi?> = _trace.asStateFlow()
@@ -631,6 +676,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val pref = getApplication<Application>().dataStore.data.first()
             _avatarStyle.value = AvatarStyle.fromValue(pref[AVATAR_STYLE_KEY])
             _themeMode.value = ThemeMode.fromValue(pref[THEME_KEY])
+            _locationEnabled.value = pref[LOCATION_ENABLED_KEY] ?: false
+            _locationPromptDismissed.value = pref[LOCATION_PROMPT_DISMISSED_KEY] ?: false
+            _locationPrecision.value = LocationPrecision.fromValue(pref[LOCATION_PRECISION_KEY])
+            val lat = pref[LOCATION_LAT_KEY]
+            val lon = pref[LOCATION_LON_KEY]
+            if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)
+            // Refresh in the background if the user has location on and the permission is still held.
+            if (_locationEnabled.value) refreshLocation()
         }
         // Drop discovered contacts whose TTL has elapsed so the table doesn't grow unbounded.
         viewModelScope.launch {
@@ -650,6 +703,127 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             getApplication<Application>().dataStore.edit { it[THEME_KEY] = mode.value }
             _themeMode.value = mode
         }
+    }
+
+    // ---- approximate / precise location --------------------------------------
+
+    /** The runtime permission a given precision needs (FINE for precise, COARSE for approximate). */
+    private fun permissionFor(precision: LocationPrecision): String =
+        if (precision == LocationPrecision.FINE) Manifest.permission.ACCESS_FINE_LOCATION
+        else Manifest.permission.ACCESS_COARSE_LOCATION
+
+    /** True once the location permission for [precision] has been granted to the app. */
+    fun hasLocationPermission(precision: LocationPrecision = _locationPrecision.value): Boolean =
+        ContextCompat.checkSelfPermission(getApplication(), permissionFor(precision)) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Turns distance estimates on at [precision] (after its permission was granted) and grabs an
+     * initial fix. Also marks the Explore opt-in banner as answered so it won't show again.
+     */
+    fun enableLocation(precision: LocationPrecision = _locationPrecision.value) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit {
+                it[LOCATION_ENABLED_KEY] = true
+                it[LOCATION_PROMPT_DISMISSED_KEY] = true
+                it[LOCATION_PRECISION_KEY] = precision.value
+            }
+            _locationEnabled.value = true
+            _locationPromptDismissed.value = true
+            _locationPrecision.value = precision
+        }
+        refreshLocation()
+    }
+
+    /** Dismisses the Explore opt-in banner without enabling location (the user declined). */
+    fun dismissLocationPrompt() {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[LOCATION_PROMPT_DISMISSED_KEY] = true }
+            _locationPromptDismissed.value = true
+        }
+    }
+
+    /** Settings toggle: turn distance estimates on (grabs a fix) or off (forgets the cached location). */
+    fun setLocationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit {
+                it[LOCATION_ENABLED_KEY] = enabled
+                if (enabled) it[LOCATION_PROMPT_DISMISSED_KEY] = true
+                if (!enabled) {
+                    it.remove(LOCATION_LAT_KEY)
+                    it.remove(LOCATION_LON_KEY)
+                }
+            }
+            _locationEnabled.value = enabled
+            if (enabled) {
+                _locationPromptDismissed.value = true
+            } else {
+                _userLocation.value = null
+            }
+        }
+        if (enabled) refreshLocation()
+    }
+
+    /**
+     * Refreshes our position: surfaces any last-known fix immediately (so distances show right away)
+     * and also asks for a fresh single update, since on many devices last-known is null. The fix is
+     * rounded per the current precision. No-op if location is off or the permission is missing.
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    fun refreshLocation() {
+        if (!_locationEnabled.value || !hasLocationPermission()) return
+        val lm = getApplication<Application>().getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            ?: return
+        // Instant: most recent last-known fix across providers.
+        runCatching {
+            lm.getProviders(true).mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
+        }.getOrNull()?.let { storeLocation(it) }
+        // Fresh: a single current-location update (last-known is often null on real devices/emulators).
+        // Precise mode prefers GPS; approximate prefers the (faster, coarser) network provider.
+        val order = if (_locationPrecision.value == LocationPrecision.FINE)
+            listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+        else
+            listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+        val provider = order.firstOrNull { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) } ?: return
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                lm.getCurrentLocation(provider, null, ContextCompat.getMainExecutor(getApplication())) { loc ->
+                    loc?.let { storeLocation(it) }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                lm.requestSingleUpdate(
+                    provider,
+                    object : android.location.LocationListener {
+                        override fun onLocationChanged(loc: Location) { storeLocation(loc) }
+                        override fun onProviderEnabled(p: String) {}
+                        override fun onProviderDisabled(p: String) {}
+                        @Deprecated("Deprecated in Java")
+                        override fun onStatusChanged(p: String?, status: Int, extras: android.os.Bundle?) {}
+                    },
+                    android.os.Looper.getMainLooper(),
+                )
+            }
+        }
+    }
+
+    /** Rounds a fresh fix to the current precision's decimals and caches it in state + DataStore. */
+    private fun storeLocation(loc: Location) {
+        val decimals = _locationPrecision.value.decimals
+        val rounded = UserLocation(loc.latitude.roundCoord(decimals), loc.longitude.roundCoord(decimals))
+        if (rounded == _userLocation.value) return
+        _userLocation.value = rounded
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit {
+                it[LOCATION_LAT_KEY] = rounded.lat
+                it[LOCATION_LON_KEY] = rounded.lon
+            }
+        }
+    }
+
+    private fun Double.roundCoord(decimals: Int): Double {
+        val f = Math.pow(10.0, decimals.toDouble())
+        return Math.round(this * f) / f
     }
 
     /**
@@ -839,6 +1013,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }
+            }
+        }
+        // Persist the latest Sidepath ANNOUNCE per node so the profile's "Last announcement" (and its
+        // openable packet) survive a restart, after the in-memory Rx Log has aged out.
+        viewModelScope.launch {
+            service.rxPackets.collect { list ->
+                list.filter { it.controlKind == cz.meshcore.sidepath.protocol.ControlKind.ANNOUNCE }
+                    .groupBy { it.source.toHex() }
+                    .forEach { (hex, pkts) ->
+                        val p = pkts.maxByOrNull { it.timestampMs } ?: return@forEach
+                        if (!processed.add("ann:ble:$hex:${p.timestampMs}")) return@forEach
+                        val pub = topology.value.firstOrNull { it.nodeId.toHex() == hex }?.publicKey?.toHex().orEmpty()
+                        dao.upsertAnnouncement(
+                            cz.meshcore.meshward.data.NodeAnnouncement(
+                                nodeHex = hex,
+                                source = DiscoverySource.SIDEPATH,
+                                pubKeyHex = pub,
+                                timestampMs = p.timestampMs,
+                                rawHex = p.raw.toHex(),
+                            ),
+                        )
+                    }
+            }
+        }
+        // Persist the latest MeshCore ADVERT per node, likewise.
+        viewModelScope.launch {
+            service.meshCorePackets.collect { list ->
+                list.filter { it.envelope?.type == cz.meshcore.sidepath.meshcore.MeshCoreType.ADVERT }
+                    .forEach { p ->
+                        // Dedup per distinct packet (avoid re-decoding the advert on every emission).
+                        if (!processed.add("ann:mc:${p.contentId.ifBlank { p.timestampMs.toString() }}")) return@forEach
+                        val pub = meshAdvertPubKeyHex(p) ?: return@forEach
+                        dao.upsertAnnouncement(
+                            cz.meshcore.meshward.data.NodeAnnouncement(
+                                nodeHex = pub.take(20), // Sidepath-style NodeId = pubkey[:10]
+                                source = DiscoverySource.MESHCORE,
+                                pubKeyHex = pub,
+                                timestampMs = p.timestampMs,
+                                rawHex = p.raw.toHex(),
+                            ),
+                        )
+                    }
             }
         }
     }
@@ -1312,25 +1528,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- channel management --------------------------------------------------
 
-    fun joinPublic() = joinChannelPsk(ChatChannel.PUBLIC_SECRET, "Public", ChannelKind.PUBLIC)
+    /** Joins a channel and returns its conversation peer id, so the UI can jump straight there. */
+    fun joinPublic(): String = joinChannelPsk(ChatChannel.PUBLIC_SECRET, "Public", ChannelKind.PUBLIC)
 
-    fun joinNamedChannel(name: String) {
+    /** Joins a named channel; returns its peer id, or null if the name is blank. */
+    fun joinNamedChannel(name: String): String? {
         val n = name.trim().removePrefix("#").trim()
-        if (n.isEmpty()) return
+        if (n.isEmpty()) return null
         // MeshCore derives a hashtag channel's key from the name INCLUDING the leading '#'
         // (e.g. SHA-256("#xxxyyy")[:16]). Match that exactly so named channels interoperate;
         // we store the bare name ("xxxyyy") and render the '#' via channelLabel.
-        joinChannelPsk(ChatChannel.namedSecret("#$n"), n, ChannelKind.NAMED)
+        return joinChannelPsk(ChatChannel.namedSecret("#$n"), n, ChannelKind.NAMED)
     }
 
-    fun joinSecretChannel(name: String, secret: String) {
+    /** Joins a secret channel; returns its peer id, or null if the secret is blank. */
+    fun joinSecretChannel(name: String, secret: String): String? {
         val n = name.trim().ifBlank { "Secret" }
         val s = secret.trim()
-        if (s.isEmpty()) return
+        if (s.isEmpty()) return null
         // A 32-hex-char secret is taken as the raw 16-byte PSK; anything else is hashed.
         val psk = if (s.length == 32 && s.all { it.lowercaseChar() in "0123456789abcdef" }) s.hexToBytes()
         else ChatChannel.namedSecret(s)
-        joinChannelPsk(psk, n, ChannelKind.SECRET)
+        return joinChannelPsk(psk, n, ChannelKind.SECRET)
     }
 
     fun leaveChannel(pskHex: String) {
@@ -1371,17 +1590,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return false
     }
 
-    private fun joinChannelPsk(psk: ByteArray, name: String, kind: String) {
+    private fun joinChannelPsk(psk: ByteArray, name: String, kind: String): String {
+        val pskHex = psk.toHex()
         viewModelScope.launch {
             dao.upsertChannel(
                 Channel(
-                    pskHex = psk.toHex(),
+                    pskHex = pskHex,
                     name = name,
                     hashByte = ChatChannel.channelHash(psk).toInt() and 0xFF,
                     kind = kind,
                 )
             )
         }
+        return channelPeerId(pskHex)
     }
 
     fun markRead(peerHex: String) {
@@ -1436,6 +1657,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The CoreScope-compatible MeshCore content hash of a raw inner packet, or null if undecodable. */
     fun meshContentHash(raw: ByteArray): String? = MeshCoreCodec.computeContentHash(raw)
+
+    /**
+     * The advertised public key (hex) of a MeshCore ADVERT packet, or null when the packet isn't an
+     * advert (or can't be decoded). Lets the profile match a bridged node to the advert it heard.
+     */
+    fun meshAdvertPubKeyHex(p: cz.meshcore.sidepath.meshcore.MeshCorePacket): String? {
+        val env = p.envelope ?: return null
+        if (env.type != cz.meshcore.sidepath.meshcore.MeshCoreType.ADVERT) return null
+        return MeshCoreCodec.decodeAdvert(env.payload)?.publicKeyHex
+    }
 
     /**
      * Saves the configured packet-analyzer base URLs (one per line in [text]). Blank input restores
@@ -1553,6 +1784,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             channelText = msg.text,
         )
     }.getOrNull()
+
+    /**
+     * Rebuilds a [MeshCorePacket] from just the raw inner MeshCore bytes (no carrying [Message]),
+     * for the profile's persisted MeshCore ADVERT. Only the decoded envelope + receipt time are known.
+     */
+    fun decodeMeshCorePacketRaw(hex: String, timestampMs: Long): cz.meshcore.sidepath.meshcore.MeshCorePacket? = runCatching {
+        val raw = hex.hexToBytes()
+        cz.meshcore.sidepath.meshcore.MeshCorePacket(
+            timestampMs = timestampMs,
+            source = NodeId.BROADCAST,
+            datagramId = ByteArray(0),
+            path = emptyList(),
+            directRssi = cz.meshcore.sidepath.service.RSSI_UNKNOWN,
+            raw = raw,
+            envelope = cz.meshcore.sidepath.meshcore.MeshCoreCodec.decodeEnvelope(raw),
+        )
+    }.getOrNull()
+
+    /** The persisted last-heard announcements (Sidepath + MeshCore) for a node, for its profile. */
+    fun announcementsForNode(nodeHex: String) = dao.announcementsForNode(nodeHex)
 
     /** Resolves a node id (hex) to its best-known display name, for route detail rendering. */
     fun nameForHex(hex: String): String =

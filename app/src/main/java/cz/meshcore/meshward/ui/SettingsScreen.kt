@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
+import cz.meshcore.meshward.LocationPrecision
 import cz.meshcore.meshward.ThemeMode
 import cz.meshcore.meshward.hexToBytes
 import cz.meshcore.meshward.toHex
@@ -74,6 +76,12 @@ fun SettingsScreen(
     val dmMaxTries by vm.dmMaxTries.collectAsState()
     val floodTtl by vm.floodTtl.collectAsState()
     val analyzerUrls by vm.analyzerUrls.collectAsState()
+    val locationEnabled by vm.locationEnabled.collectAsState()
+    val locationPrecision by vm.locationPrecision.collectAsState()
+
+    // Turns distances on at a chosen precision: enables if already permitted, else requests (or
+    // routes to app settings when permanently denied so the toggle can't silently no-op).
+    val enableLocation = rememberLocationEnabler(vm)
 
     val pubKeyHex = remember(seedHex) {
         runCatching { Identity.fromSeed(seedHex.hexToBytes()).publicKey.toHex() }.getOrDefault("")
@@ -286,6 +294,51 @@ fun SettingsScreen(
                             analyzerDraft = cz.meshcore.meshward.DEFAULT_ANALYZER_URL
                             vm.setAnalyzerUrls("")
                         }) { Text("Reset") }
+                    }
+                }
+            }
+
+            // Location & distances (opt-in)
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Distance estimates", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Use your location to show distances to MeshCore repeaters and other nodes " +
+                                    "that advertise GPS. Coordinates stay on this device and are never transmitted.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.size(12.dp))
+                        Switch(
+                            checked = locationEnabled,
+                            onCheckedChange = { on -> if (on) enableLocation(locationPrecision) else vm.setLocationEnabled(false) },
+                        )
+                    }
+                    if (locationEnabled) {
+                        Text("Precision", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = locationPrecision == LocationPrecision.COARSE,
+                                onClick = { enableLocation(LocationPrecision.COARSE) },
+                                label = { Text("Approximate") },
+                            )
+                            FilterChip(
+                                selected = locationPrecision == LocationPrecision.FINE,
+                                onClick = { enableLocation(LocationPrecision.FINE) },
+                                label = { Text("Precise") },
+                            )
+                        }
+                        Text(
+                            if (locationPrecision == LocationPrecision.FINE)
+                                "Precise: uses GPS for exact distances (needs the precise-location permission)."
+                            else
+                                "Approximate: rounded to ~110 m — enough for rough distances, more private.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }

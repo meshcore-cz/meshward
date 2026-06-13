@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -342,8 +343,7 @@ fun formatAgo(ts: Long): String {
     }
 }
 
-fun formatRelative(ts: Long): String {
-    val now = System.currentTimeMillis()
+fun formatRelative(ts: Long, now: Long = System.currentTimeMillis()): String {
     val sameDay = dayFmt.format(Date(ts)) == dayFmt.format(Date(now))
     return if (sameDay) timeFmt.format(Date(ts)) else dayFmt.format(Date(ts))
 }
@@ -351,18 +351,19 @@ fun formatRelative(ts: Long): String {
 /**
  * Like [formatRelative] but renders the last hour as a relative age ("now", "Ns ago", "Nm ago"),
  * falling back to the clock (same day) or date. Used for recently discovered contacts on Explore.
+ * Pass a ticking [now] to keep the relative age live.
  */
-fun formatRelativeAge(ts: Long): String {
-    val diff = System.currentTimeMillis() - ts
-    return if (diff in 0 until 3_600_000) formatMessageTime(ts) else formatRelative(ts)
+fun formatRelativeAge(ts: Long, now: Long = System.currentTimeMillis()): String {
+    val diff = now - ts
+    return if (diff in 0 until 3_600_000) formatMessageTime(ts, now) else formatRelative(ts, now)
 }
 
 /**
  * Per-message timestamp: "now" (<5s), "Ns ago" (<1m), "Nm ago" (<1h), else the clock time.
- * Recomputed on recomposition (not a live ticker).
+ * Pass a ticking [now] for a live age; otherwise it's recomputed only on recomposition.
  */
-fun formatMessageTime(ts: Long): String {
-    val diff = System.currentTimeMillis() - ts
+fun formatMessageTime(ts: Long, now: Long = System.currentTimeMillis()): String {
+    val diff = now - ts
     return when {
         diff < 0 -> timeFmt.format(Date(ts))
         diff < 5_000 -> "now"
@@ -391,6 +392,20 @@ fun dateLabel(ts: Long): String {
 
 /** True when [a] and [b] fall on different calendar days (used to insert date separators). */
 fun differentDay(a: Long, b: Long): Boolean = !isSameDay(a, b)
+
+/** Straight-line distance in metres from our location [from] to (lat, lon). */
+fun distanceMeters(from: cz.meshcore.meshward.UserLocation, lat: Double, lon: Double): Float {
+    val out = FloatArray(1)
+    android.location.Location.distanceBetween(from.lat, from.lon, lat, lon, out)
+    return out[0]
+}
+
+/** A compact distance label: "120 m", "1.3 km", "12 km". */
+fun formatDistance(meters: Float): String = when {
+    meters < 1000 -> "${meters.roundToInt()} m"
+    meters < 10_000 -> "%.1f km".format(meters / 1000)
+    else -> "${(meters / 1000).roundToInt()} km"
+}
 
 /** Compact elapsed-duration label, e.g. "9s", "4m", "2h", "3d". Used for peer connection uptime. */
 fun shortDuration(ms: Long): String {
@@ -836,7 +851,7 @@ private fun PathEndpointRow(seed: String, title: String, subtitle: String) {
 
 /** One repeater hop in [MeshCorePathDialog]: prefix badge + resolved name, with ambiguity expandable. */
 @Composable
-private fun PathHopRow(prefixHex: String, hopNumber: Int, candidates: List<MeshCoreHopMatch>) {
+internal fun PathHopRow(prefixHex: String, hopNumber: Int, candidates: List<MeshCoreHopMatch>) {
     var expanded by remember { mutableStateOf(false) }
     val known = candidates.isNotEmpty()
     val ambiguous = candidates.size > 1

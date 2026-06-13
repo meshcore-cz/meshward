@@ -41,14 +41,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -60,6 +64,10 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.MeshCoreUri
 import cz.meshcore.meshward.ProfileInfo
 import cz.meshcore.meshward.data.ChannelKind
+import cz.meshcore.meshward.data.DiscoverySource
+import cz.meshcore.sidepath.meshcore.MeshCorePacket
+import cz.meshcore.sidepath.service.RxPacket
+import kotlinx.coroutines.flow.flowOf
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +85,29 @@ fun ProfileScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
     var showKey by remember { mutableStateOf(false) }
+
+    // Last-heard announcements for this node, surfaced with a button to open the originating packet.
+    // Persisted in the DB (keyed by node + source) so they survive a restart, after the live Rx Log
+    // buffers have aged out. Sidepath = last signed ANNOUNCE; MeshCore = last ADVERT.
+    val peers by vm.connectedPeers.collectAsState()
+    val userLoc by vm.userLocation.collectAsState()
+    // Distance to this node, when both we and it have coordinates.
+    val distance = userLoc?.takeIf { profile.hasGps }?.let { formatDistance(distanceMeters(it, profile.lat, profile.lon)) }
+    val announcements by remember(profile.nodeHex, profile.isChannel) {
+        if (profile.isChannel || profile.nodeHex.isBlank()) flowOf(emptyList())
+        else vm.announcementsForNode(profile.nodeHex)
+    }.collectAsState(emptyList())
+    val sidepathAnn = announcements.firstOrNull { it.source == DiscoverySource.SIDEPATH }
+    val meshAnn = announcements.firstOrNull { it.source == DiscoverySource.MESHCORE }
+    var showAnnounce by remember { mutableStateOf<RxPacket?>(null) }
+    var showAdvert by remember { mutableStateOf<MeshCorePacket?>(null) }
+    // Ticks so the announcement ages stay live while the profile is open.
+    val nowMs by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            value = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
 
     // A MeshCore share URI other apps can scan to add this contact / join this channel.
     val shareUri = when {
@@ -221,11 +252,25 @@ fun ProfileScreen(
             if (profile.isChannel) {
                 ChannelInfo(profile)
             } else {
-                UserInfo(profile)
+                UserInfo(profile, distance)
                 // Neighbors this node directly connects to, learned from its signed ANNOUNCE.
                 if (profile.neighborHexes.isNotEmpty()) {
                     Spacer(Modifier.size(20.dp))
                     NeighborsSection(vm, profile.neighborHexes, onOpenProfile)
+                }
+                if (sidepathAnn != null || meshAnn != null) {
+                    Spacer(Modifier.size(20.dp))
+                    AnnouncementsSection(
+                        sidepathAnnounceMs = sidepathAnn?.timestampMs,
+                        meshAdvertMs = meshAnn?.timestampMs,
+                        nowMs = nowMs,
+                        onShowSidepath = {
+                            sidepathAnn?.let { showAnnounce = vm.decodePacket(it.rawHex, timestampMs = it.timestampMs) }
+                        },
+                        onShowMesh = {
+                            meshAnn?.let { showAdvert = vm.decodeMeshCorePacketRaw(it.rawHex, it.timestampMs) }
+                        },
+                    )
                 }
             }
 
@@ -320,6 +365,63 @@ fun ProfileScreen(
             dismissButton = { TextButton(onClick = { showKey = false }) { Text("Close") } },
         )
     }
+
+    showAnnounce?.let {
+        PacketDetailDialog(
+            p = it,
+            vm = vm,
+            peers = peers,
+            onOpenProfile = { hex -> showAnnounce = null; onOpenProfile(hex) },
+            onDismiss = { showAnnounce = null },
+        )
+    }
+    showAdvert?.let {
+        MeshCoreDetailDialog(it, vm, onDismiss = { showAdvert = null })
+    }
+}
+
+/** Last-heard announcement rows (Sidepath ANNOUNCE / MeshCore ADVERT), each opening its packet. */
+@Composable
+private fun AnnouncementsSection(
+    sidepathAnnounceMs: Long?,
+    meshAdvertMs: Long?,
+    nowMs: Long,
+    onShowSidepath: () -> Unit,
+    onShowMesh: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            "Last announcement",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (sidepathAnnounceMs != null) {
+            AnnouncementRow("Sidepath", formatRelativeAge(sidepathAnnounceMs, nowMs), onShowSidepath)
+        }
+        if (meshAdvertMs != null) {
+            AnnouncementRow("MeshCore", formatRelativeAge(meshAdvertMs, nowMs), onShowMesh)
+        }
+    }
+}
+
+/** One announcement source: network label + relative time on the left, "View packet" on the right. */
+@Composable
+private fun AnnouncementRow(network: String, relative: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column {
+            Text(network, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+            Text(
+                relative,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onClick) { Text("View packet") }
+    }
 }
 
 /** A small icon-over-label outlined button that shares a row evenly with its siblings. */
@@ -378,7 +480,7 @@ private fun NeighborsSection(
 }
 
 @Composable
-private fun UserInfo(p: ProfileInfo) {
+private fun UserInfo(p: ProfileInfo, distance: String? = null) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
         InfoRow("Node ID", p.nodeHex)
         if (p.pubKeyHex.isNotBlank()) InfoRow("Public key", p.pubKeyHex)
@@ -391,6 +493,7 @@ private fun UserInfo(p: ProfileInfo) {
             if (p.nodeType != 0) InfoRow("Node type", nodeTypeLabel(p.nodeType))
             InfoRow("Signature", if (p.sigVerified) "verified" else "unverified")
             if (p.hasGps) InfoRow("Location", "%.6f, %.6f".format(p.lat, p.lon))
+            if (distance != null) InfoRow("Distance", "$distance (approx.)")
             if (p.nodeAdvertisedMs > 0) InfoRow("Advertised", formatRelative(p.nodeAdvertisedMs))
         }
     }
@@ -460,6 +563,9 @@ private fun RenameDialog(
     // Start empty with the current name only as a placeholder — leaving it blank keeps the
     // current name (no need to clear the field first just to rename).
     var text by remember { mutableStateOf("") }
+    // Focus the field and pop the keyboard as soon as the dialog appears.
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (isChannel) "Rename channel" else "Rename contact") },
@@ -470,6 +576,7 @@ private fun RenameDialog(
                 singleLine = true,
                 label = { Text("Name") },
                 placeholder = { Text(current) },
+                modifier = Modifier.focusRequester(focusRequester),
             )
         },
         confirmButton = {

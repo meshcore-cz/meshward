@@ -1,10 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- BLE/foreground-service permissions and the SidepathService are declared in the
          :sidepath-networking library manifest and merged in. -->
     <!-- Camera is used only to scan MeshCore QR codes (channel/contact URIs). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Coarse (approximate) location is opt-in, used only on-device to estimate distances to
+         nodes that advertise GPS coordinates. Coordinates are never transmitted off the device.
+         The :sidepath-networking library caps this at maxSdkVersion=30 (BLE-only); drop that cap so
+         the permission is requestable on Android 12+ where we actually use it for distances. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        tools:remove="android:maxSdkVersion" />
+    <!-- Fine (precise) location is offered as an opt-in precision mode for distance estimates. The
+         library also caps this at maxSdkVersion=30; drop the cap so it's requestable on Android 12+. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        tools:remove="android:maxSdkVersion" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
     <application
         android:name="cz.meshcore.meshward.ChatApp"
         android:label="Meshward"

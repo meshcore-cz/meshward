@@ -3,6 +3,8 @@ package cz.meshcore.meshward.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -17,21 +19,26 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +51,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
+import cz.meshcore.meshward.LocationPrecision
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
 
@@ -59,9 +67,33 @@ fun ExploreScreen(
     val discovered by vm.discoveredContacts.collectAsState()
     val chatItems by vm.chatItems.collectAsState()
     val myNode by vm.nodeId.collectAsState()
+    val userLoc by vm.userLocation.collectAsState()
+    val locationEnabled by vm.locationEnabled.collectAsState()
+    val promptDismissed by vm.locationPromptDismissed.collectAsState()
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
+    var typeFilter by remember { mutableStateOf<String?>(null) } // DiscoverySource.* or null = all
+    var roleFilter by remember { mutableStateOf<Int?>(null) }     // MeshCore node type, or null = all
+    var sortByDistance by remember { mutableStateOf(false) }
+
+    // Ask for coarse location when the user opts in (routes to app settings if permanently denied).
+    val requestLocation = rememberLocationEnabler(vm)
+    // Grab a fresh fix whenever Explore is shown with location enabled.
+    LaunchedEffect(locationEnabled) { if (locationEnabled) vm.refreshLocation() }
+
+    val showLocationBanner = !promptDismissed && !locationEnabled
+    val canSortByDistance = locationEnabled && userLoc != null
+    val shown = remember(discovered, typeFilter, roleFilter, sortByDistance, userLoc) {
+        var list = discovered
+        typeFilter?.let { t -> list = list.filter { it.source == t } }
+        roleFilter?.let { r -> list = list.filter { it.nodeType == r } }
+        val loc = userLoc
+        if (sortByDistance && loc != null) {
+            list = list.sortedBy { if (it.hasGps) distanceMeters(loc, it.lat, it.lon) else Float.MAX_VALUE }
+        }
+        list
+    }
 
     Scaffold(
         topBar = {
@@ -113,33 +145,58 @@ fun ExploreScreen(
                     onOpenProfile = onOpenProfile,
                     modifier = Modifier.padding(padding),
                 )
-            discovered.isEmpty() ->
-                Column(
-                    Modifier.fillMaxSize().padding(padding).padding(24.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Icon(Icons.Default.TravelExplore, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.size(12.dp))
-                    Text("No discovered contacts", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Nodes you hear advertising — over Sidepath or bridged from MeshCore — appear here.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                item {
-                    Text(
-                        "Discovered contacts (${discovered.size})",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
+                if (showLocationBanner) {
+                    item {
+                        LocationOptInBanner(
+                            onAllow = { precision -> requestLocation(precision) },
+                            onDeny = { vm.dismissLocationPrompt() },
+                        )
+                    }
                 }
-                items(discovered, key = { it.pubKeyHex }) { d ->
-                    DiscoveredRow(d) { onOpenProfile(d.nodeHex) }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                if (discovered.isNotEmpty()) {
+                    item {
+                        FilterBar(
+                            typeFilter = typeFilter,
+                            onTypeFilter = { typeFilter = it },
+                            roleFilter = roleFilter,
+                            onRoleFilter = { roleFilter = it },
+                            canSortByDistance = canSortByDistance,
+                            sortByDistance = sortByDistance,
+                            onToggleSort = { sortByDistance = !sortByDistance },
+                        )
+                    }
+                    item {
+                        Text(
+                            "Discovered contacts (${shown.size}${if (shown.size != discovered.size) " of ${discovered.size}" else ""})",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
+                }
+                if (discovered.isEmpty()) {
+                    item {
+                        Column(
+                            Modifier.fillMaxWidth().padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Icon(Icons.Default.TravelExplore, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.size(12.dp))
+                            Text("No discovered contacts", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Nodes you hear advertising — over Sidepath or bridged from MeshCore — appear here.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                } else {
+                    items(shown, key = { it.pubKeyHex }) { d ->
+                        val distance = userLoc?.takeIf { d.hasGps }?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
+                        DiscoveredRow(d, distance = distance) { onOpenProfile(d.nodeHex) }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
                 }
             }
         }
@@ -166,7 +223,7 @@ fun ExploreScreen(
 }
 
 @Composable
-internal fun DiscoveredRow(d: DiscoveredContact, onClick: () -> Unit) {
+internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -191,11 +248,115 @@ internal fun DiscoveredRow(d: DiscoveredContact, onClick: () -> Unit) {
             )
         }
         Spacer(Modifier.width(8.dp))
-        Text(
-            formatRelativeAge(d.lastAdvertisedMs),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                formatRelativeAge(d.lastAdvertisedMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (distance != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Icon(
+                        Icons.Default.NearMe,
+                        contentDescription = "Distance",
+                        modifier = Modifier.size(11.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        distance,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The opt-in banner asking whether — and how precisely — to use location for distance estimates.
+ * Approximate grants coarse (~110 m) location; Precise grants exact GPS.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LocationOptInBanner(onAllow: (LocationPrecision) -> Unit, onDeny: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.NearMe, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                Text(
+                    "Use your location to calculate distances to nearby nodes?",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            Text(
+                "Use your location to estimate the distance to MeshCore repeaters and other nodes that " +
+                    "advertise GPS. Approximate keeps only a rounded (~110 m) position; Precise uses exact " +
+                    "GPS. Your coordinates stay on this device and are never sent anywhere — change it " +
+                    "anytime in Settings.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                TextButton(onClick = onDeny) { Text("Not now") }
+                OutlinedButton(onClick = { onAllow(LocationPrecision.COARSE) }) { Text("Approximate") }
+                Button(onClick = { onAllow(LocationPrecision.FINE) }) { Text("Precise") }
+            }
+        }
+    }
+}
+
+/** Filter chips for source/role plus a "Nearest" sort toggle (only when a location is known). */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun FilterBar(
+    typeFilter: String?,
+    onTypeFilter: (String?) -> Unit,
+    roleFilter: Int?,
+    onRoleFilter: (Int?) -> Unit,
+    canSortByDistance: Boolean,
+    sortByDistance: Boolean,
+    onToggleSort: () -> Unit,
+) {
+    FlowRow(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // Source
+        FilterChip(
+            selected = typeFilter == DiscoverySource.SIDEPATH,
+            onClick = { onTypeFilter(if (typeFilter == DiscoverySource.SIDEPATH) null else DiscoverySource.SIDEPATH) },
+            label = { Text("Sidepath") },
         )
+        FilterChip(
+            selected = typeFilter == DiscoverySource.MESHCORE,
+            onClick = { onTypeFilter(if (typeFilter == DiscoverySource.MESHCORE) null else DiscoverySource.MESHCORE) },
+            label = { Text("MeshCore") },
+        )
+        // Role (MeshCore node types)
+        listOf(2 to "Repeater", 1 to "Chat", 3 to "Room", 4 to "Sensor").forEach { (type, label) ->
+            FilterChip(
+                selected = roleFilter == type,
+                onClick = { onRoleFilter(if (roleFilter == type) null else type) },
+                label = { Text(label) },
+            )
+        }
+        if (canSortByDistance) {
+            FilterChip(
+                selected = sortByDistance,
+                onClick = { onToggleSort() },
+                leadingIcon = { Icon(Icons.Default.NearMe, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                label = { Text("Nearest") },
+            )
+        }
     }
 }
 

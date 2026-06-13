@@ -34,8 +34,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -69,6 +71,13 @@ fun ChatsScreen(
     var showJoin by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    // Ticks once a second so the rows' relative timestamps ("now", "Ns ago", "Nm ago") stay current.
+    val nowMs by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            value = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -134,6 +143,7 @@ fun ChatsScreen(
                     ChatRow(
                         item,
                         isSelf = item.peerHex == myNode.toHex(),
+                        nowMs = nowMs,
                         onClick = { onOpenConversation(item.peerHex) },
                         onAvatarClick = { onOpenProfile(item.peerHex) },
                     )
@@ -164,7 +174,10 @@ fun ChatsScreen(
         JoinChannelSheet(
             vm = vm,
             showPublic = !publicJoined,
-            onJoined = { showJoin = false },
+            onJoined = { peerHex ->
+                showJoin = false
+                onOpenConversation(peerHex)
+            },
             onDismiss = { showJoin = false },
         )
     }
@@ -172,7 +185,13 @@ fun ChatsScreen(
 
 /** A merged-list row: a direct conversation or a channel (selected by [ChatListItem.isChannel]). */
 @Composable
-internal fun ChatRow(item: ChatListItem, isSelf: Boolean, onClick: () -> Unit, onAvatarClick: () -> Unit) {
+internal fun ChatRow(
+    item: ChatListItem,
+    isSelf: Boolean,
+    onClick: () -> Unit,
+    onAvatarClick: () -> Unit,
+    nowMs: Long = System.currentTimeMillis(),
+) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -232,7 +251,7 @@ internal fun ChatRow(item: ChatListItem, isSelf: Boolean, onClick: () -> Unit, o
         Column(horizontalAlignment = Alignment.End) {
             if (item.lastTimestampMs > 0) {
                 Text(
-                    formatRelative(item.lastTimestampMs),
+                    formatRelativeAge(item.lastTimestampMs, nowMs),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

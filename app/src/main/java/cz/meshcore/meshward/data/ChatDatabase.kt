@@ -10,8 +10,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // v3: NodeIDs widened 8→10 bytes (protocol v3), so old peer/contact ids are stale —
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
-    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class],
-    version = 16,
+    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, NodeAnnouncement::class],
+    version = 17,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -130,12 +130,25 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v16→v17: persist the latest announcement (Sidepath ANNOUNCE / MeshCore ADVERT) per node so
+        // the profile's "Last announcement" survives a restart. Additive — new table.
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `node_announcements` (" +
+                        "`nodeHex` TEXT NOT NULL, `source` TEXT NOT NULL, " +
+                        "`pubKeyHex` TEXT NOT NULL, `timestampMs` INTEGER NOT NULL, " +
+                        "`rawHex` TEXT NOT NULL, PRIMARY KEY(`nodeHex`, `source`))"
+                )
+            }
+        }
+
         fun get(context: Context): ChatDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 "meshward.db",
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
                 .fallbackToDestructiveMigration()
                 .build().also { instance = it }
         }

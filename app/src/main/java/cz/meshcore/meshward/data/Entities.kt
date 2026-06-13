@@ -58,6 +58,22 @@ data class DiscoveredContact(
 )
 
 /**
+ * The most recent announcement we've heard from a node, persisted so the profile's "Last
+ * announcement" survives a restart (the live Rx buffers don't). Keyed by ([nodeHex], [source]) so a
+ * node can have one Sidepath ANNOUNCE and one MeshCore ADVERT entry. [rawHex] is the raw packet —
+ * the full Sidepath datagram for SIDEPATH, the inner MeshCore OTA bytes for MESHCORE — so its packet
+ * detail can be rebuilt offline. [timestampMs] is local receipt time.
+ */
+@Entity(tableName = "node_announcements", primaryKeys = ["nodeHex", "source"])
+data class NodeAnnouncement(
+    val nodeHex: String,
+    val source: String,      // DiscoverySource.*
+    val pubKeyHex: String,
+    val timestampMs: Long,
+    val rawHex: String,
+)
+
+/**
  * One emoji reaction by one author on one message. Keyed by ([messageId], [authorHex]) so a person
  * has at most one reaction per message (reacting again replaces it; the same emoji again removes
  * it). [messageId] is the target [Message.id]; [authorHex] is the reactor's node id hex.

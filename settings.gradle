@@ -23,13 +23,13 @@ rootProject.name = "Meshward"
 include ':app'
 
 include ':sidepath-protocol'
-project(':sidepath-protocol').projectDir = file('../bleedge/android/sidepath-protocol')
+project(':sidepath-protocol').projectDir = file('../sidepath-protocol/android/sidepath-protocol')
 
 include ':sidepath-chat'
-project(':sidepath-chat').projectDir = file('../bleedge/android/sidepath-chat')
+project(':sidepath-chat').projectDir = file('../sidepath-protocol/android/sidepath-chat')
 
 include ':sidepath-meshcore'
-project(':sidepath-meshcore').projectDir = file('../bleedge/android/sidepath-meshcore')
+project(':sidepath-meshcore').projectDir = file('../sidepath-protocol/android/sidepath-meshcore')
 
 include ':sidepath-networking'
-project(':sidepath-networking').projectDir = file('../bleedge/android/sidepath-networking')
+project(':sidepath-networking').projectDir = file('../sidepath-protocol/android/sidepath-networking')
