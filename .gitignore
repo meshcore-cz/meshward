@@ -25,3 +25,5 @@ local.properties
 # Keystores / secrets
 *.jks
 *.keystore
+.DS_Store
+screenshot*

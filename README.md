@@ -29,15 +29,17 @@ This makes Meshward both an independent local messenger and an open companion ap
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/chats.png" width="220" alt="Meshward chats">
+  <img src="docs/screen_1.png" width="180" alt="Meshward screenshot 1">
   &nbsp;&nbsp;
-  <img src="docs/screenshots/nearby.png" width="220" alt="Nearby Meshward nodes">
+  <img src="docs/screen_2.png" width="180" alt="Meshward screenshot 2">
   &nbsp;&nbsp;
-  <img src="docs/screenshots/network.png" width="220" alt="Meshward network map">
+  <img src="docs/screen_3.png" width="180" alt="Meshward screenshot 3">
 </p>
 
 <p align="center">
-  <sub>Chats · Nearby nodes · Network topology</sub>
+  <img src="docs/screen_4.png" width="180" alt="Meshward screenshot 4">
+  &nbsp;&nbsp;
+  <img src="docs/screen_5.png" width="180" alt="Meshward screenshot 5">
 </p>
 
 ---
