@@ -51,7 +51,10 @@ import cz.meshcore.sidepath.service.MeshStats
 import cz.meshcore.sidepath.service.PeerInfo
 import cz.meshcore.sidepath.service.ReceivedMessage
 import cz.meshcore.sidepath.service.TopologyEntry
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -823,6 +826,77 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun refreshNetworkDefs(url: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             refreshNetworkDefs(getApplication(), url).map { fresh -> _builtinNetworks.value = fresh }
+        }
+
+    /**
+     * The CoreScope analyzer endpoints to offer the user: the active network's analyzers, or — when
+     * the active network has none (or there's no active network) — every analyzer across all networks.
+     */
+    fun activeNetworkAnalyzers(): List<AnalyzerEndpoint> {
+        val active = activeNetwork.value?.let { parseAnalyzerEndpoints(it.analyzerUrls) }.orEmpty()
+        if (active.isNotEmpty()) return active
+        return networks.value.flatMap { parseAnalyzerEndpoints(it.analyzerUrls) }.distinctBy { it.host }
+    }
+
+    /** The code of the network that owns [endpoint] (else the active network's), for tiering synced nodes. */
+    fun networkCodeForAnalyzer(endpoint: AnalyzerEndpoint): String =
+        networks.value.firstOrNull { net -> parseAnalyzerEndpoints(net.analyzerUrls).any { it.host == endpoint.host } }?.code
+            ?: activeNetwork.value?.code.orEmpty()
+
+    // True while an analyzer roster sync is running (drives the Explore button's spinner).
+    private val _analyzerSyncing = MutableStateFlow(false)
+    val analyzerSyncing: StateFlow<Boolean> = _analyzerSyncing.asStateFlow()
+    // One-shot sync outcomes (node count on success) for the UI to surface as a toast/snackbar.
+    private val _analyzerSyncEvents = MutableSharedFlow<Result<Int>>(extraBufferCapacity = 1)
+    val analyzerSyncEvents: SharedFlow<Result<Int>> = _analyzerSyncEvents.asSharedFlow()
+
+    /**
+     * Kicks off an analyzer roster sync in [viewModelScope] (so it survives navigation), tiering the
+     * synced nodes to the network that owns [endpoint]. No-op if a sync is already running; the result
+     * is emitted on [analyzerSyncEvents].
+     */
+    fun startAnalyzerSync(endpoint: AnalyzerEndpoint) {
+        if (_analyzerSyncing.value) return
+        _analyzerSyncing.value = true
+        viewModelScope.launch {
+            val result = syncContactsFromAnalyzer(endpoint, networkCodeForAnalyzer(endpoint))
+            _analyzerSyncing.value = false
+            _analyzerSyncEvents.tryEmit(result)
+        }
+    }
+
+    /**
+     * Pulls the full node roster from a CoreScope analyzer (`/api/nodes`) and upserts each node into
+     * the discovered-contacts table as a MeshCore contact tiered to [networkCode], caching the node's
+     * extra analyzer fields as a JSON blob. Returns the number of nodes synced, or a failure on a
+     * network/parse error. Runs off the main thread.
+     */
+    private suspend fun syncContactsFromAnalyzer(endpoint: AnalyzerEndpoint, networkCode: String): Result<Int> =
+        withContext(Dispatchers.IO) {
+            fetchAnalyzerNodes(endpoint).mapCatching { nodes ->
+                val now = System.currentTimeMillis()
+                for (n in nodes) {
+                    if (n.publicKeyHex.equals(myPubKeyHex.value, ignoreCase = true)) continue
+                    val nodeHex = n.publicKeyHex.take(20) // Sidepath-style NodeId = pubkey[:10]
+                    val name = n.name.ifBlank { nameFromPubKey(n.publicKeyHex) }
+                    dao.refreshMeshCoreName(nodeHex, name)
+                    upsertDiscovered(
+                        pubKeyHex = n.publicKeyHex,
+                        nodeHex = nodeHex,
+                        name = name,
+                        source = DiscoverySource.MESHCORE,
+                        nodeType = analyzerRoleToNodeType(n.role),
+                        hasGps = n.hasGps,
+                        lat = n.lat,
+                        lon = n.lon,
+                        lastAdvertisedMs = if (n.lastSeenMs > 0) n.lastSeenMs else now,
+                        nodeAdvertisedMs = n.lastSeenMs,
+                        networkCode = networkCode,
+                        analyzerData = n.rawJson,
+                    )
+                }
+                nodes.size
+            }
         }
 
     /** Adds or updates a user network. The stored row is always a custom (non-built-in) network. */
@@ -2078,8 +2152,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastAdvertisedMs: Long,
         nodeAdvertisedMs: Long = 0L,
         networkCode: String = "",
+        analyzerData: String? = null,
     ) {
-        val firstSeen = dao.discoveredByPubKey(pubKeyHex)?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
+        val existing = dao.discoveredByPubKey(pubKeyHex)
+        val firstSeen = existing?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
         dao.upsertDiscovered(
             DiscoveredContact(
                 pubKeyHex = pubKeyHex,
@@ -2094,7 +2170,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 lastAdvertisedMs = lastAdvertisedMs,
                 nodeAdvertisedMs = nodeAdvertisedMs,
                 firstSeenMs = firstSeen,
-                networkCode = networkCode,
+                networkCode = networkCode.ifBlank { existing?.networkCode.orEmpty() },
+                // Keep any previously-synced analyzer data unless this call provides a fresh blob.
+                analyzerData = analyzerData ?: existing?.analyzerData.orEmpty(),
             )
         )
     }

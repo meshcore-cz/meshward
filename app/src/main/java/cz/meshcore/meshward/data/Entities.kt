@@ -91,6 +91,9 @@ data class DiscoveredContact(
     // Meshcore Network this contact was tiered to at discovery (the network of the bridge it came
     // through). Set for MeshCore contacts heard via a gateway; blank for Sidepath-native nodes.
     val networkCode: String = "",
+    // Extra node metadata fetched from a CoreScope analyzer's /api/nodes (scores, relay counts,
+    // battery, last_heard, …) as a JSON object string. Empty for contacts never synced.
+    val analyzerData: String = "",
 )
 
 /**

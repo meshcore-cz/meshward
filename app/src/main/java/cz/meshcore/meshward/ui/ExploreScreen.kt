@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.NearMe
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -49,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -79,6 +82,29 @@ fun ExploreScreen(
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
+    var showSyncPicker by remember { mutableStateOf(false) }
+    val analyzerSyncing by vm.analyzerSyncing.collectAsState()
+    val context = LocalContext.current
+    // Surface each sync outcome (node count or error) as a toast.
+    LaunchedEffect(Unit) {
+        vm.analyzerSyncEvents.collect { result ->
+            val msg = result.fold(
+                onSuccess = { "Synced $it contacts from analyzer" },
+                onFailure = { "Sync failed: ${it.message ?: "unknown error"}" },
+            )
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    // Picks the analyzer to sync from: straight through when there's one, the chooser when several.
+    fun startSync() {
+        val endpoints = vm.activeNetworkAnalyzers()
+        when {
+            endpoints.isEmpty() ->
+                android.widget.Toast.makeText(context, "No analyzer set for this network", android.widget.Toast.LENGTH_SHORT).show()
+            endpoints.size == 1 -> vm.startAnalyzerSync(endpoints.first())
+            else -> showSyncPicker = true
+        }
+    }
     // Filter state lives in the VM so selections survive navigating to another page and back (the
     // Explore subtree leaves composition on navigation, which would drop screen-local state).
     val typeFilter by vm.exploreTypeFilter.collectAsState()
@@ -193,12 +219,18 @@ fun ExploreScreen(
                         )
                     }
                     item {
-                        Text(
-                            "Discovered contacts (${shown.size}${if (shown.size != discovered.size) " of ${discovered.size}" else ""})",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Discovered contacts (${shown.size}${if (shown.size != discovered.size) " of ${discovered.size}" else ""})",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+                            )
+                            AnalyzerSyncButton(syncing = analyzerSyncing, onClick = { startSync() })
+                        }
                     }
                 }
                 if (discovered.isEmpty()) {
@@ -215,6 +247,12 @@ fun ExploreScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodyMedium,
                             )
+                            Spacer(Modifier.size(16.dp))
+                            OutlinedButton(onClick = { startSync() }, enabled = !analyzerSyncing) {
+                                Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.size(8.dp))
+                                Text(if (analyzerSyncing) "Syncing…" else "Sync from analyzer")
+                            }
                         }
                     }
                 } else {
@@ -245,6 +283,31 @@ fun ExploreScreen(
                 TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
             },
         )
+    }
+
+    if (showSyncPicker) {
+        AnalyzerPickerDialog(
+            title = "Sync contacts from analyzer",
+            endpoints = vm.activeNetworkAnalyzers(),
+            onPick = { showSyncPicker = false; vm.startAnalyzerSync(it) },
+            onDismiss = { showSyncPicker = false },
+        )
+    }
+}
+
+/** Title-row action that pulls the full node roster from a CoreScope analyzer; spins while syncing. */
+@Composable
+private fun AnalyzerSyncButton(syncing: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = !syncing) {
+        if (syncing) {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        } else {
+            Icon(
+                Icons.Default.CloudDownload,
+                contentDescription = "Sync contacts from analyzer",
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
     }
 }
 

@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
     <!-- BLE/foreground-service permissions and the SidepathService are declared in the
          :sidepath-networking library manifest and merged in. -->
+    <!-- Internet is used only for opt-in HTTP fetches: refreshing network definitions and syncing
+         the contact roster from a CoreScope analyzer. The mesh transport itself is BLE-only. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Camera is used only to scan MeshCore QR codes (channel/contact URIs). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />

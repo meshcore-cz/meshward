@@ -246,17 +246,20 @@ private fun meshCoreMeta(env: MeshCoreEnvelope?): String {
 @Composable
 internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val analyzers by vm.analyzerUrls.collectAsState()
+    // Analyzers come from the active Meshcore network's CoreScope endpoints (Settings → Networks).
+    val activeNetwork by vm.activeNetwork.collectAsState()
+    val networks by vm.networks.collectAsState()
+    val analyzers = remember(activeNetwork, networks) { vm.activeNetworkAnalyzers() }
     // CoreScope content hash — route-independent logical packet id, used for the analyzer link.
     val contentHash by produceState<String?>(initialValue = null, p.raw) {
         value = vm.meshContentHash(p.raw)
     }
     var showAnalyzerChooser by remember { mutableStateOf(false) }
     var showPath by remember { mutableStateOf(false) }
-    fun openAnalyzer(base: String) {
+    fun openAnalyzer(endpoint: cz.meshcore.meshward.AnalyzerEndpoint) {
         val hash = contentHash ?: return
         runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(base + hash)))
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(endpoint.packetUrl(hash))))
         }
     }
     // Opens the raw OTA bytes in the MeshCore packet tool (bytes are '+'-separated hex).
@@ -279,20 +282,11 @@ internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismis
     }
 
     if (showAnalyzerChooser) {
-        AlertDialog(
-            onDismissRequest = { showAnalyzerChooser = false },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { showAnalyzerChooser = false }) { Text("Cancel") } },
-            title = { Text("Open in analyzer") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    analyzers.forEach { base ->
-                        TextButton(onClick = { showAnalyzerChooser = false; openAnalyzer(base) }) {
-                            Text(base, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            },
+        AnalyzerPickerDialog(
+            title = "Open in analyzer",
+            endpoints = analyzers,
+            onPick = { showAnalyzerChooser = false; openAnalyzer(it) },
+            onDismiss = { showAnalyzerChooser = false },
         )
     }
 
@@ -301,8 +295,8 @@ internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismis
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
         dismissButton = {
             OutlinedButton(
-                enabled = contentHash != null,
-                onClick = { if (analyzers.size <= 1) openAnalyzer(analyzers.firstOrNull() ?: return@OutlinedButton) else showAnalyzerChooser = true },
+                enabled = contentHash != null && analyzers.isNotEmpty(),
+                onClick = { if (analyzers.size == 1) openAnalyzer(analyzers.first()) else showAnalyzerChooser = true },
             ) { Text("Open in analyzer") }
         },
         title = { Text("MeshCore packet") },
