@@ -123,19 +123,6 @@ fun NetworkScreen(
             }
 
             item {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    OutlinedButton(onClick = nav.openMeshCoreLog, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("MeshCore")
-                    }
-                }
-            }
-
-            item {
                 Text(
                     lastPacketLabel(lastPacketAt),
                     style = MaterialTheme.typography.bodySmall,

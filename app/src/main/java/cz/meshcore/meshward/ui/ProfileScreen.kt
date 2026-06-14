@@ -1,7 +1,9 @@
 package cz.meshcore.meshward.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ContentCopy
@@ -28,6 +31,7 @@ import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
@@ -55,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -154,6 +159,13 @@ fun ProfileScreen(
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center,
             )
+
+            // "Saved" chip right under the name when this node is in our contacts (replaces the old
+            // "In contacts: Yes" detail row).
+            if (!profile.isChannel && profile.isContact) {
+                Spacer(Modifier.size(6.dp))
+                SavedChip()
+            }
 
             // Mark bridged MeshCore identities — they're full contacts but not directly DM-reachable.
             // When the node was tiered to a Meshcore Network, show its code chip; tapping opens the
@@ -486,22 +498,23 @@ private fun NeighborsSection(
     neighborHexes: List<String>,
     onOpenProfile: (String) -> Unit,
 ) {
+    // A neighbor list is 10-byte NodeIDs only. Those we can resolve to a full public key (heard their
+    // announce, or connected to them) get a real name + identicon; the rest are NodeID-only and can't,
+    // so they're grouped apart and shown plainly as "Unknown node" rather than mixed in.
+    val (known, unknown) = neighborHexes.partition { vm.pubKeyForHex(it).isNotBlank() }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             "Neighbors (${neighborHexes.size})",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        neighborHexes.forEach { hex ->
+        known.forEach { hex ->
             val label = vm.nameForHex(hex).ifBlank { "node ${hex.take(8)}" }
-            // Use the same identicon as everywhere else when we can resolve the node's full public key
-            // (NodeId is only pubkey[:10], which can't seed an identicon); else fall back to initials.
-            val pub = vm.pubKeyForHex(hex)
             Row(
                 Modifier.fillMaxWidth().clickable { onOpenProfile(hex) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(seed = hex, label = label, size = 32, identiconKey = pub.ifBlank { null })
+                Avatar(seed = hex, label = label, size = 32, identiconKey = vm.pubKeyForHex(hex))
                 Spacer(Modifier.size(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
@@ -514,13 +527,63 @@ private fun NeighborsSection(
                 }
             }
         }
+        // Unidentified neighbors: NodeID only, kept visually apart and de-emphasised.
+        if (unknown.isNotEmpty()) {
+            if (known.isNotEmpty()) {
+                androidx.compose.material3.HorizontalDivider(
+                    Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                )
+            }
+            Text(
+                "Unidentified (${unknown.size}) — NodeID only, no key heard yet",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            unknown.forEach { hex -> UnknownNodeRow(hex, onOpenProfile) }
+        }
     }
 }
 
-/** A titled block of profile details, with a section header above its rows. */
+/** A neighbor we can't resolve to a full public key: NodeID only, no identicon, no real name. */
+@Composable
+private fun UnknownNodeRow(hex: String, onOpenProfile: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onOpenProfile(hex) }.alpha(0.6f),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(32.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, androidx.compose.foundation.shape.CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.QuestionMark,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.size(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Unknown node", style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+            Text(
+                hex.take(20),
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** A titled block of profile details: a separator line, then a section header, then its rows. */
 @Composable
 private fun ProfileSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        androidx.compose.material3.HorizontalDivider(
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+        )
         Text(
             title,
             style = MaterialTheme.typography.titleSmall,
@@ -531,13 +594,14 @@ private fun ProfileSection(title: String, content: @Composable ColumnScope.() ->
     }
 }
 
-/** Details that apply to any node, regardless of transport: identity, device, and location. */
+/** Details that apply to any node, regardless of transport: device and location. The identity (public
+ * key) lives in the hero up top, and "in contacts" is shown as the "Saved" chip under the name. */
 @Composable
 private fun CommonDetails(p: ProfileInfo, distance: String?) {
+    // Nothing common to show for a bare node — skip the section (and its header) entirely.
+    if (p.platform.isBlank() && !p.hasGps) return
     ProfileSection("Details") {
-        InfoRow("Node ID", p.nodeHex)
         if (p.platform.isNotBlank()) InfoRow("Platform", p.platform)
-        InfoRow("In contacts", if (p.isContact) "Yes" else "No")
         if (p.hasGps) LocationRow(p.lat, p.lon, distance)
     }
 }
@@ -633,6 +697,33 @@ private fun NetworkProfileBadge(code: String) {
             color = androidx.compose.ui.graphics.Color(0xFF00838F),
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
         )
+    }
+}
+
+/** "Saved" chip shown under the name for nodes already in our contacts (mirrors Explore's badge). */
+@Composable
+private fun SavedChip() {
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(13.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "Saved",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
     }
 }
 

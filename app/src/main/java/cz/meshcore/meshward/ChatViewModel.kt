@@ -339,7 +339,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val exploreSortByDistance: StateFlow<Boolean> = _exploreSortByDistance.asStateFlow()
     fun setExploreSortByDistance(v: Boolean) { _exploreSortByDistance.value = v }
 
-    private val _exploreHideSaved = MutableStateFlow(false) // hide already-saved contacts from Explore
+    private val _exploreHideSaved = MutableStateFlow(true) // hide already-saved contacts from Explore (default on)
     val exploreHideSaved: StateFlow<Boolean> = _exploreHideSaved.asStateFlow()
     fun setExploreHideSaved(v: Boolean) { _exploreHideSaved.value = v }
 
@@ -2168,9 +2168,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun platformForHex(hex: String): String = nodePlatform(hex, topology.value)
 
     /** Resolves a node id (hex) to its 32-byte public key (hex), for identicon avatars, or "". */
-    fun pubKeyForHex(hex: String): String =
-        if (hex == nodeId.value.toHex()) myPubKeyHex.value
-        else publicKeyHex(hex, contacts.value.associateBy { it.nodeHex }, topology.value)
+    fun pubKeyForHex(hex: String): String {
+        if (hex == nodeId.value.toHex()) return myPubKeyHex.value
+        publicKeyHex(hex, contacts.value.associateBy { it.nodeHex }, topology.value)
+            .takeIf { it.isNotEmpty() }?.let { return it }
+        // A directly-connected peer carries its full key from NODE_INFO (§4.2), read on connect — so
+        // it's resolvable before we've heard the peer's signed ANNOUNCE (i.e. before it's in topology).
+        return connectedPeers.value
+            .firstOrNull { it.nodeId.toHex() == hex && it.publicKey.size == 32 }
+            ?.publicKey?.toHex().orEmpty()
+    }
 
     /** This node's own NodeId as hex — used to exclude self from route pickers. */
     fun myNodeHex(): String = nodeId.value.toHex()

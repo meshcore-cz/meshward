@@ -27,8 +27,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.NearMe
+import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Visibility
@@ -500,17 +504,30 @@ internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, isSav
                 if (isSaved) SavedChip()
                 DiscoveredBadge(d)
             }
-            val sub = buildString {
-                append(formatPubKey(d.pubKeyHex.ifBlank { d.nodeHex }))
-                if (d.source == DiscoverySource.MESHCORE) append(" · ${nodeTypeLabel(d.nodeType)}")
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    formatPubKey(d.pubKeyHex.ifBlank { d.nodeHex }),
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (d.source == DiscoverySource.MESHCORE) {
+                    Icon(
+                        nodeTypeIcon(d.nodeType),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        nodeTypeLabel(d.nodeType),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                }
             }
-            Text(
-                sub,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-            )
         }
         Spacer(Modifier.width(8.dp))
         Column(horizontalAlignment = Alignment.End) {
@@ -619,11 +636,19 @@ private fun FilterBar(
             onClick = { onTypeFilter(if (typeFilter == DiscoverySource.MESHCORE) null else DiscoverySource.MESHCORE) },
             label = { Text("MeshCore") },
         )
-        // Role (MeshCore node types)
-        listOf(2 to "Repeater", 1 to "Chat", 3 to "Room", 4 to "Sensor").forEach { (type, label) ->
+        // Role (MeshCore node types) — each with its representative icon.
+        listOf(2 to "Repeater", 1 to "Companion", 3 to "Room", 4 to "Sensor").forEach { (type, label) ->
             FilterChip(
                 selected = roleFilter == type,
                 onClick = { onRoleFilter(if (roleFilter == type) null else type) },
+                leadingIcon = {
+                    Icon(
+                        nodeTypeIcon(type),
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
                 label = { Text(label) },
             )
         }
@@ -631,7 +656,14 @@ private fun FilterBar(
             FilterChip(
                 selected = sortByDistance,
                 onClick = { onToggleSort() },
-                leadingIcon = { Icon(Icons.Default.NearMe, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.NearMe,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                },
                 label = { Text("Nearest") },
             )
         }
@@ -730,9 +762,18 @@ private fun SourceBadge(source: String) {
 
 /** MeshCore node-type code → label. Shared with the profile's MeshCore section. */
 fun nodeTypeLabel(t: Int): String = when (t) {
-    1 -> "chat"
+    1 -> "companion"
     2 -> "repeater"
     3 -> "room"
     4 -> "sensor"
     else -> "unknown"
+}
+
+/** MeshCore node-type code → a representative icon, for the discovered-contacts list. */
+fun nodeTypeIcon(t: Int): androidx.compose.ui.graphics.vector.ImageVector = when (t) {
+    1 -> Icons.Default.Smartphone     // companion (a chat client / handheld)
+    2 -> Icons.Default.Router         // repeater
+    3 -> Icons.Default.Forum          // room server
+    4 -> Icons.Default.Sensors        // sensor
+    else -> Icons.Default.Hub
 }
