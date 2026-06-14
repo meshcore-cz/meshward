@@ -45,7 +45,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,11 +79,12 @@ fun ExploreScreen(
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
-    // rememberSaveable so filter selections survive navigating to a detail screen and back.
-    var typeFilter by rememberSaveable { mutableStateOf<String?>(null) } // DiscoverySource.* or null = all
-    var roleFilter by rememberSaveable { mutableStateOf<Int?>(null) }     // MeshCore node type, or null = all
-    var networkFilter by rememberSaveable { mutableStateOf<String?>(null) } // network code, or null = all
-    var sortByDistance by rememberSaveable { mutableStateOf(false) }
+    // Filter state lives in the VM so selections survive navigating to another page and back (the
+    // Explore subtree leaves composition on navigation, which would drop screen-local state).
+    val typeFilter by vm.exploreTypeFilter.collectAsState()
+    val roleFilter by vm.exploreRoleFilter.collectAsState()
+    val networkFilter by vm.exploreNetworkFilter.collectAsState()
+    val sortByDistance by vm.exploreSortByDistance.collectAsState()
 
     // Ask for coarse location when the user opts in (routes to app settings if permanently denied).
     val requestLocation = rememberLocationEnabler(vm)
@@ -179,17 +179,17 @@ fun ExploreScreen(
                     item {
                         FilterBar(
                             typeFilter = typeFilter,
-                            onTypeFilter = { typeFilter = it },
+                            onTypeFilter = { vm.setExploreTypeFilter(it) },
                             roleFilter = roleFilter,
-                            onRoleFilter = { roleFilter = it },
+                            onRoleFilter = { vm.setExploreRoleFilter(it) },
                             // Keep the selected code chip available even if its bridge dropped out,
                             // so the filter can always be cleared.
                             networkCodes = (detectedNetworks.map { it.code } + networkFilter).filterNotNull().distinct(),
                             networkFilter = networkFilter,
-                            onNetworkFilter = { networkFilter = it },
+                            onNetworkFilter = { vm.setExploreNetworkFilter(it) },
                             canSortByDistance = canSortByDistance,
                             sortByDistance = sortByDistance,
-                            onToggleSort = { sortByDistance = !sortByDistance },
+                            onToggleSort = { vm.setExploreSortByDistance(!sortByDistance) },
                         )
                     }
                     item {
@@ -310,7 +310,7 @@ internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, onCli
                 DiscoveredBadge(d)
             }
             val sub = buildString {
-                append(d.nodeHex.take(16))
+                append(formatPubKey(d.pubKeyHex.ifBlank { d.nodeHex }))
                 if (d.source == DiscoverySource.MESHCORE) append(" · ${nodeTypeLabel(d.nodeType)}")
             }
             Text(

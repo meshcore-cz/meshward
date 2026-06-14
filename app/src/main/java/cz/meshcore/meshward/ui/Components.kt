@@ -231,10 +231,10 @@ private fun Identicon(key: String, modifier: Modifier) {
     }
 }
 
-/** Renders a public key (hex) compactly as `<e9534284...49e01345>`; blank in → blank out. */
+/** Renders a public key (hex) compactly as `<a45ede...ee4a34>` (6 + 6); blank in → blank out. */
 fun formatPubKey(hex: String): String = when {
     hex.isBlank() -> ""
-    hex.length >= 16 -> "<${hex.take(8)}...${hex.takeLast(8)}>"
+    hex.length >= 12 -> "<${hex.take(6)}...${hex.takeLast(6)}>"
     else -> "<$hex>"
 }
 

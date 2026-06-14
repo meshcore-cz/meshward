@@ -310,6 +310,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _analyzerUrls = MutableStateFlow(listOf(DEFAULT_ANALYZER_URL))
     val analyzerUrls: StateFlow<List<String>> = _analyzerUrls.asStateFlow()
 
+    // ---- Explore filter state -------------------------------------------------
+    // Held in the VM (not screen-local) so the selected filters survive navigating to another page
+    // and back — the Explore subtree leaves composition on navigation, which would drop local state.
+    private val _exploreTypeFilter = MutableStateFlow<String?>(null) // DiscoverySource.* or null = all
+    val exploreTypeFilter: StateFlow<String?> = _exploreTypeFilter.asStateFlow()
+    fun setExploreTypeFilter(v: String?) { _exploreTypeFilter.value = v }
+
+    private val _exploreRoleFilter = MutableStateFlow<Int?>(null) // MeshCore node type, or null = all
+    val exploreRoleFilter: StateFlow<Int?> = _exploreRoleFilter.asStateFlow()
+    fun setExploreRoleFilter(v: Int?) { _exploreRoleFilter.value = v }
+
+    private val _exploreNetworkFilter = MutableStateFlow<String?>(null) // network code, or null = all
+    val exploreNetworkFilter: StateFlow<String?> = _exploreNetworkFilter.asStateFlow()
+    fun setExploreNetworkFilter(v: String?) { _exploreNetworkFilter.value = v }
+
+    private val _exploreSortByDistance = MutableStateFlow(false)
+    val exploreSortByDistance: StateFlow<Boolean> = _exploreSortByDistance.asStateFlow()
+    fun setExploreSortByDistance(v: Boolean) { _exploreSortByDistance.value = v }
+
     // ---- Meshcore Networks (auto-detected from bridge announces) --------------
     // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
     // cached on disk; user-added ones live in the DB as custom overrides. The effective list is the
