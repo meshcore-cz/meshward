@@ -195,6 +195,8 @@ fun ChatRoot(vm: ChatViewModel) {
                 // Profile (depth 2) outranks Settings (depth 1) in `top`, so close the profile
                 // first; otherwise Settings would never surface.
                 onOpenSettings = { openProfile = null; showSettings = true },
+                // NetworkDetail outranks Profile, so it layers on top; back returns to the profile.
+                onOpenNetworkDetail = { openNetworkDetail = it },
             )
             is Dest.Conversation -> ConversationScreen(
                 vm, dest.peer,
@@ -214,7 +216,13 @@ fun ChatRoot(vm: ChatViewModel) {
                 onBack = popTop,
                 onOpenDetail = { openNetworkDetail = it },
             )
-            is Dest.NetworkDetail -> NetworkDetailScreen(vm, dest.code, onBack = popTop)
+            is Dest.NetworkDetail -> NetworkDetailScreen(
+                vm, dest.code,
+                onBack = popTop,
+                // "Change network" jumps to Settings → Meshcore Networks; close the detail first so
+                // the Networks screen surfaces (it's outranked by NetworkDetail in `top`).
+                onOpenNetworks = { openNetworkDetail = null; showNetworks = true },
+            )
             Dest.RxLog -> RxLogScreen(
                 vm,
                 onBack = popTop,

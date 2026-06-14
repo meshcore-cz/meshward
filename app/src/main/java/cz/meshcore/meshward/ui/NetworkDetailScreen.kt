@@ -2,7 +2,6 @@ package cz.meshcore.meshward.ui
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,27 +9,26 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -39,17 +37,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
-import cz.meshcore.meshward.LatLon
-import cz.meshcore.meshward.parseGeoRings
-import kotlin.math.cos
+import cz.meshcore.meshward.parseAnalyzerEndpoints
 
 /** Extended overview of a single Meshcore Network: identity, tech parameters, links, and territory. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -58,11 +51,16 @@ fun NetworkDetailScreen(
     vm: ChatViewModel,
     code: String,
     onBack: () -> Unit,
+    onOpenNetworks: () -> Unit = {},
 ) {
     val networks by vm.networks.collectAsState()
-    val activeCode by vm.activeNetworkCode.collectAsState()
+    val auto by vm.networkAuto.collectAsState()
+    val detected by vm.detectedNetworks.collectAsState()
+    val activeNetwork by vm.activeNetwork.collectAsState()
     val net = networks.firstOrNull { it.code == code }
-    val isActive = code == activeCode
+    val isActive = activeNetwork?.code == code
+    // This network is the one in effect because a nearby bridge announced it (vs. a manual pin).
+    val isAutoDetected = auto && detected.any { it.code == code }
 
     Scaffold(
         topBar = {
@@ -94,16 +92,39 @@ fun NetworkDetailScreen(
                         NetworkCodeChip(net.code)
                         Text(net.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     }
+                    Text(
+                        "Meshcore network",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     if (net.description.isNotBlank()) {
                         Text(net.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (isActive) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Text("Active network", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                if (isAutoDetected) "Active network · auto-detected" else "Active network",
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelLarge,
+                            )
                         }
-                    } else {
-                        Button(onClick = { vm.setActiveNetwork(net.code) }) { Text("Set as active") }
+                    } else if (isAutoDetected) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Default.Hub, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Text("Detected nearby", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!isActive) {
+                            Button(onClick = { vm.setActiveNetwork(net.code) }) { Text("Set as active") }
+                        }
+                        // Manage detection / pinning lives in Settings → Meshcore Networks.
+                        OutlinedButton(onClick = onOpenNetworks) {
+                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.size(6.dp))
+                            Text("Change network")
+                        }
                     }
                 }
             }
@@ -124,15 +145,15 @@ fun NetworkDetailScreen(
                 }
             }
 
-            // Links: packet analyzers and (future) MQTT endpoints
-            val analyzerLinks = remember(net.analyzerUrls) { net.analyzerUrls.toLines() }
+            // Links: CoreScope packet analyzers (stored as bare domains) and (future) MQTT endpoints
+            val analyzers = remember(net.analyzerUrls) { parseAnalyzerEndpoints(net.analyzerUrls) }
             val mqttLinks = remember(net.mqttEndpoints) { net.mqttEndpoints.toLines() }
-            if (analyzerLinks.isNotEmpty() || mqttLinks.isNotEmpty()) {
+            if (analyzers.isNotEmpty() || mqttLinks.isNotEmpty()) {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (analyzerLinks.isNotEmpty()) {
+                        if (analyzers.isNotEmpty()) {
                             Text("Packet analyzers", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                            analyzerLinks.forEach { LinkRow(it) }
+                            analyzers.forEach { AnalyzerRow(it) }
                         }
                         if (mqttLinks.isNotEmpty()) {
                             Spacer(Modifier.size(4.dp))
@@ -145,19 +166,7 @@ fun NetworkDetailScreen(
                 }
             }
 
-            // Territory
-            val rings = remember(net.geoJson) { parseGeoRings(net.geoJson) }
-            if (rings.isNotEmpty()) {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.Default.Public, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                            Text("Territory", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                        }
-                        TerritoryMap(rings, Modifier.fillMaxWidth().aspectRatio(1.4f))
-                    }
-                }
-            }
+            // Territory (GeoJSON) is intentionally hidden for now; the renderer below stays for later.
         }
     }
 }
@@ -170,18 +179,19 @@ private fun ParamLine(label: String, value: String?) {
     }
 }
 
+/** A CoreScope analyzer endpoint row: shows the bare host, opens its packets browser. */
 @Composable
-private fun LinkRow(url: String) {
+private fun AnalyzerRow(endpoint: cz.meshcore.meshward.AnalyzerEndpoint) {
     val context = LocalContext.current
     Row(
         Modifier.fillMaxWidth().clickable {
-            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(endpoint.packetsBaseUrl()))) }
         }.padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            url,
+            endpoint.host,
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium,
             fontFamily = FontFamily.Monospace,
@@ -189,51 +199,6 @@ private fun LinkRow(url: String) {
             maxLines = 1,
         )
         Icon(Icons.Default.OpenInNew, contentDescription = "Open", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-    }
-}
-
-/**
- * Draws a network's territory rings offline (no map tiles / no network). Uses an equirectangular
- * projection with longitude scaled by cos(mean latitude) so the shape isn't horizontally stretched,
- * fit to the canvas with padding.
- */
-@Composable
-private fun TerritoryMap(rings: List<List<LatLon>>, modifier: Modifier = Modifier) {
-    val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-    val stroke = MaterialTheme.colorScheme.primary
-    val surface = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-
-    val pts = rings.flatten()
-    val minLat = pts.minOf { it.lat }
-    val maxLat = pts.maxOf { it.lat }
-    val minLon = pts.minOf { it.lon }
-    val maxLon = pts.maxOf { it.lon }
-    val cosLat = cos(Math.toRadians((minLat + maxLat) / 2.0)).coerceAtLeast(0.01)
-
-    Surface(color = surface, shape = RoundedCornerShape(12.dp), modifier = modifier) {
-        Canvas(Modifier.fillMaxSize().padding(12.dp)) {
-            val xrange = ((maxLon - minLon) * cosLat).coerceAtLeast(1e-6)
-            val yrange = (maxLat - minLat).coerceAtLeast(1e-6)
-            val scale = minOf(size.width / xrange, size.height / yrange).toFloat()
-            // Center the projected shape within the canvas.
-            val dx = (size.width - (xrange * scale).toFloat()) / 2f
-            val dy = (size.height - (yrange * scale).toFloat()) / 2f
-            fun project(p: LatLon) = Offset(
-                dx + ((p.lon - minLon) * cosLat * scale).toFloat(),
-                dy + ((maxLat - p.lat) * scale).toFloat(), // flip Y so north is up
-            )
-            rings.forEach { ring ->
-                if (ring.size < 2) return@forEach
-                val path = Path().apply {
-                    val first = project(ring.first())
-                    moveTo(first.x, first.y)
-                    ring.drop(1).forEach { val o = project(it); lineTo(o.x, o.y) }
-                    close()
-                }
-                drawPath(path, color = fill)
-                drawPath(path, color = stroke, style = Stroke(width = 2.5f))
-            }
-        }
     }
 }
 

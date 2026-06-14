@@ -215,6 +215,9 @@ data class ProfileInfo(
     val lon: Double = 0.0,
     val sigVerified: Boolean = false,
     val nodeAdvertisedMs: Long = 0L,
+    // Meshcore Network this node was tiered to at discovery (the bridge network it came through).
+    // Set for MeshCore nodes heard via a gateway; blank otherwise.
+    val networkCode: String = "",
 )
 
 /** Our own approximate location, used only on-device to estimate distances to GPS-bearing nodes. */
@@ -1459,6 +1462,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     lon = disc?.lon ?: 0.0,
                     sigVerified = disc?.sigVerified ?: false,
                     nodeAdvertisedMs = disc?.nodeAdvertisedMs ?: 0L,
+                    networkCode = disc?.networkCode.orEmpty(),
                 )
             }
         }.stateIn(

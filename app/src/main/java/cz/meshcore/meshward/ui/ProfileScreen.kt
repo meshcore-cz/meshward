@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ContentCopy
@@ -79,6 +80,7 @@ fun ProfileScreen(
     onTrace: (String) -> Unit,
     onOpenProfile: (String) -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onOpenNetworkDetail: (String) -> Unit = {},
 ) {
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var renaming by remember { mutableStateOf(false) }
@@ -150,9 +152,28 @@ fun ProfileScreen(
             )
 
             // Mark bridged MeshCore identities — they're full contacts but not directly DM-reachable.
+            // When the node was tiered to a Meshcore Network, show its code chip; tapping opens the
+            // network's detail.
             if (profile.isMeshCore) {
                 Spacer(Modifier.size(6.dp))
-                MeshCoreProfileBadge()
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    MeshCoreProfileBadge()
+                    if (profile.networkCode.isNotBlank()) {
+                        Row(
+                            Modifier.clickable { onOpenNetworkDetail(profile.networkCode) },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            NetworkProfileBadge(profile.networkCode)
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Open network",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
             }
 
             // Public key (users) shown right under the name, same compact form as the chat list,
@@ -496,6 +517,24 @@ private fun UserInfo(p: ProfileInfo, distance: String? = null) {
             if (distance != null) InfoRow("Distance", "$distance (approx.)")
             if (p.nodeAdvertisedMs > 0) InfoRow("Advertised", formatRelative(p.nodeAdvertisedMs))
         }
+    }
+}
+
+/** Network-code pill shown next to [MeshCoreProfileBadge]; sized to match it exactly. */
+@Composable
+private fun NetworkProfileBadge(code: String) {
+    androidx.compose.material3.Surface(
+        color = androidx.compose.ui.graphics.Color(0xFF00838F).copy(alpha = 0.16f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+    ) {
+        Text(
+            code,
+            style = MaterialTheme.typography.labelMedium,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            color = androidx.compose.ui.graphics.Color(0xFF00838F),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+        )
     }
 }
 

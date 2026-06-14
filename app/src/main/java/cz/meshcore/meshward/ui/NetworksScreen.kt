@@ -345,7 +345,8 @@ private fun NetworkEditForm(
 
             OutlinedTextField(
                 value = analyzers, onValueChange = { analyzers = it }, modifier = Modifier.fillMaxWidth(),
-                label = { Text("Analyzer URLs (one per line)") },
+                label = { Text("CoreScope analyzers (one domain per line)") },
+                supportingText = { Text("Just the domain, e.g. analyzer.meshcore.cz — links are built automatically.") },
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             )
             OutlinedTextField(
@@ -389,20 +390,23 @@ private fun NetworkEditForm(
     }
 }
 
+/** The Meshcore network accent (the former MeshCore badge teal), shared by every network code chip. */
+val NetworkChipColor = androidx.compose.ui.graphics.Color(0xFF00838F)
+
 /** A monospace pill showing a network's short code, e.g. `CZ`. Shared across network surfaces. */
 @Composable
 fun NetworkCodeChip(code: String) {
     Surface(
-        color = MaterialTheme.colorScheme.primaryContainer,
+        color = NetworkChipColor.copy(alpha = 0.16f),
         shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
     ) {
         Text(
             code.ifBlank { "—" },
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.titleMedium,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+            color = NetworkChipColor,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
         )
     }
 }

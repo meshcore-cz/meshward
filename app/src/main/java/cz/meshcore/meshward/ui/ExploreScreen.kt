@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TravelExplore
@@ -44,6 +45,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +71,7 @@ fun ExploreScreen(
     val discovered by vm.discoveredContacts.collectAsState()
     val activeNetwork by vm.activeNetwork.collectAsState()
     val detectedNetworks by vm.detectedNetworks.collectAsState()
+    val networkAuto by vm.networkAuto.collectAsState()
     val chatItems by vm.chatItems.collectAsState()
     val myNode by vm.nodeId.collectAsState()
     val userLoc by vm.userLocation.collectAsState()
@@ -77,10 +80,11 @@ fun ExploreScreen(
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
-    var typeFilter by remember { mutableStateOf<String?>(null) } // DiscoverySource.* or null = all
-    var roleFilter by remember { mutableStateOf<Int?>(null) }     // MeshCore node type, or null = all
-    var networkFilter by remember { mutableStateOf<String?>(null) } // network code, or null = all
-    var sortByDistance by remember { mutableStateOf(false) }
+    // rememberSaveable so filter selections survive navigating to a detail screen and back.
+    var typeFilter by rememberSaveable { mutableStateOf<String?>(null) } // DiscoverySource.* or null = all
+    var roleFilter by rememberSaveable { mutableStateOf<Int?>(null) }     // MeshCore node type, or null = all
+    var networkFilter by rememberSaveable { mutableStateOf<String?>(null) } // network code, or null = all
+    var sortByDistance by rememberSaveable { mutableStateOf(false) }
 
     // Ask for coarse location when the user opts in (routes to app settings if permanently denied).
     val requestLocation = rememberLocationEnabler(vm)
@@ -158,6 +162,7 @@ fun ExploreScreen(
                             code = net.code,
                             name = net.name,
                             summary = networkRadioSummary(net),
+                            autoDetected = networkAuto,
                             onClick = { onOpenNetworkDetail(net.code) },
                         )
                     }
@@ -177,7 +182,9 @@ fun ExploreScreen(
                             onTypeFilter = { typeFilter = it },
                             roleFilter = roleFilter,
                             onRoleFilter = { roleFilter = it },
-                            networkCodes = detectedNetworks.map { it.code },
+                            // Keep the selected code chip available even if its bridge dropped out,
+                            // so the filter can always be cleared.
+                            networkCodes = (detectedNetworks.map { it.code } + networkFilter).filterNotNull().distinct(),
                             networkFilter = networkFilter,
                             onNetworkFilter = { networkFilter = it },
                             canSortByDistance = canSortByDistance,
@@ -241,9 +248,13 @@ fun ExploreScreen(
     }
 }
 
-/** Compact header card on Explore showing the active Meshcore Network; taps through to its detail. */
+/**
+ * Compact header card on Explore showing the active Meshcore Network; taps through to its detail.
+ * Clarifies that this is the Meshcore network and whether it was auto-detected from a nearby bridge
+ * or pinned manually.
+ */
 @Composable
-private fun ActiveNetworkCard(code: String, name: String, summary: String, onClick: () -> Unit) {
+private fun ActiveNetworkCard(code: String, name: String, summary: String, autoDetected: Boolean, onClick: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = RoundedCornerShape(12.dp),
@@ -255,14 +266,25 @@ private fun ActiveNetworkCard(code: String, name: String, summary: String, onCli
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             NetworkCodeChip(code)
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(name.ifBlank { code }, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(
-                    summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.Hub, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(13.dp))
+                    Text(
+                        if (autoDetected) "Meshcore network · auto-detected" else "Meshcore network · manual",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                if (summary.isNotBlank()) {
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
             }
             Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -285,7 +307,7 @@ internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, onCli
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(d.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                SourceBadge(d.source)
+                DiscoveredBadge(d)
             }
             val sub = buildString {
                 append(d.nodeHex.take(16))
@@ -423,10 +445,43 @@ private fun FilterBar(
     }
 }
 
+/** MeshCore brand teal, used for the source/network badges so a MeshCore origin always reads the same. */
+private val MeshCoreColor = Color(0xFF00838F)
+
+/**
+ * The origin badge on a discovered row: a MeshCore contact shows its tiered network code (small teal
+ * chip), or — when the region is unknown — just the mesh icon; a Sidepath node shows its source badge.
+ */
+@Composable
+private fun DiscoveredBadge(d: DiscoveredContact) {
+    when {
+        d.source == DiscoverySource.MESHCORE && d.networkCode.isNotBlank() ->
+            Surface(color = MeshCoreColor.copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp)) {
+                Text(
+                    d.networkCode,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MeshCoreColor,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        d.source == DiscoverySource.MESHCORE ->
+            Surface(color = MeshCoreColor.copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp)) {
+                Icon(
+                    Icons.Default.Hub,
+                    contentDescription = "MeshCore",
+                    tint = MeshCoreColor,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp).size(13.dp),
+                )
+            }
+        else -> SourceBadge(d.source)
+    }
+}
+
 @Composable
 private fun SourceBadge(source: String) {
     val (label, color) = when (source) {
-        DiscoverySource.MESHCORE -> "MESHCORE" to Color(0xFF00838F)
+        DiscoverySource.MESHCORE -> "MESHCORE" to MeshCoreColor
         else -> "SIDEPATH" to Color(0xFF546E7A)
     }
     Surface(color = color.copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp)) {
