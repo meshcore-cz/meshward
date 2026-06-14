@@ -21,6 +21,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
 import cz.meshcore.meshward.data.Channel
 import cz.meshcore.meshward.data.ChannelKind
 import cz.meshcore.meshward.data.ChatDatabase
@@ -300,7 +301,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val identityStore = IdentityStore(app)
     private var identity = identityStore.active()
 
-    private val dao = ChatDatabase.get(app, identity.dbName).chatDao()
+    private val db = ChatDatabase.get(app, identity.dbName)
+    private val dao = db.chatDao()
 
     // Per-identity DataStore keys, namespaced by the active identity id (settings don't bleed across
     // profiles). Device-level keys (theme, avatar style, location) stay shared and un-namespaced.
@@ -1029,15 +1031,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.IO) {
             fetchAnalyzerNodes(endpoint).mapCatching { nodes ->
                 val now = System.currentTimeMillis()
-                for (n in nodes) {
-                    if (n.publicKeyHex.equals(myPubKeyHex.value, ignoreCase = true)) continue
-                    val nodeHex = n.publicKeyHex.take(20) // Sidepath-style NodeId = pubkey[:10]
-                    val name = n.name.ifBlank { nameFromPubKey(n.publicKeyHex) }
-                    dao.refreshMeshCoreName(nodeHex, name)
-                    upsertDiscovered(
+                val myPub = myPubKeyHex.value
+                // Skip self, then resolve all existing rows in one query (vs a point lookup per node)
+                // so the whole roster can be written in a single transaction below.
+                val incoming = nodes.filterNot { it.publicKeyHex.equals(myPub, ignoreCase = true) }
+                // Chunk the IN-clause lookup: SQLite caps bound variables per statement (999 on older
+                // Android), and a roster can run into the thousands.
+                val existingByPub = incoming.map { it.publicKeyHex }
+                    .chunked(900)
+                    .flatMap { dao.discoveredByPubKeys(it) }
+                    .associateBy { it.pubKeyHex }
+                val rows = incoming.map { n ->
+                    buildDiscoveredRow(
+                        existing = existingByPub[n.publicKeyHex],
                         pubKeyHex = n.publicKeyHex,
-                        nodeHex = nodeHex,
-                        name = name,
+                        nodeHex = n.publicKeyHex.take(20), // Sidepath-style NodeId = pubkey[:10]
+                        name = n.name.ifBlank { nameFromPubKey(n.publicKeyHex) },
                         source = DiscoverySource.MESHCORE,
                         nodeType = analyzerRoleToNodeType(n.role),
                         hasGps = n.hasGps,
@@ -1048,6 +1057,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         networkCode = networkCode,
                         analyzerData = n.rawJson,
                     )
+                }
+                // One transaction for the whole batch — collapses thousands of per-node commits into a
+                // single fsync, which is what kept the Room I/O threads pegged during a large sync.
+                db.withTransaction {
+                    dao.upsertDiscoveredAll(rows)
+                    rows.forEach { dao.refreshMeshCoreName(it.nodeHex, it.name) }
                 }
                 nodes.size
             }
@@ -2465,29 +2480,67 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         networkCode: String = "",
         analyzerData: String? = null,
     ) {
-        val existing = dao.discoveredByPubKey(pubKeyHex)
-        val firstSeen = existing?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
-        // Null Island (0,0) is the MeshCore "no fix" sentinel — a node advertising it has no real
-        // position, so don't record it as having GPS (else distances read ~thousands of km away).
-        val realGps = hasGps && hasRealLocation(lat, lon)
         dao.upsertDiscovered(
-            DiscoveredContact(
+            buildDiscoveredRow(
+                existing = dao.discoveredByPubKey(pubKeyHex),
                 pubKeyHex = pubKeyHex,
                 nodeHex = nodeHex,
                 name = name,
                 source = source,
                 nodeType = nodeType,
-                hasGps = realGps,
+                hasGps = hasGps,
                 lat = lat,
                 lon = lon,
                 sigVerified = sigVerified,
                 lastAdvertisedMs = lastAdvertisedMs,
                 nodeAdvertisedMs = nodeAdvertisedMs,
-                firstSeenMs = firstSeen,
-                networkCode = networkCode.ifBlank { existing?.networkCode.orEmpty() },
-                // Keep any previously-synced analyzer data unless this call provides a fresh blob.
-                analyzerData = analyzerData ?: existing?.analyzerData.orEmpty(),
+                networkCode = networkCode,
+                analyzerData = analyzerData,
             )
+        )
+    }
+
+    /**
+     * Builds the [DiscoveredContact] row to upsert, merging in fields carried over from an [existing]
+     * row (first-seen time, prior network tier / analyzer blob). Pure — no DB access — so callers can
+     * prefetch [existing] in bulk and write the whole batch in one transaction.
+     */
+    private fun buildDiscoveredRow(
+        existing: DiscoveredContact?,
+        pubKeyHex: String,
+        nodeHex: String,
+        name: String,
+        source: String,
+        nodeType: Int = 0,
+        hasGps: Boolean = false,
+        lat: Double = 0.0,
+        lon: Double = 0.0,
+        sigVerified: Boolean = false,
+        lastAdvertisedMs: Long,
+        nodeAdvertisedMs: Long = 0L,
+        networkCode: String = "",
+        analyzerData: String? = null,
+    ): DiscoveredContact {
+        val firstSeen = existing?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
+        // Null Island (0,0) is the MeshCore "no fix" sentinel — a node advertising it has no real
+        // position, so don't record it as having GPS (else distances read ~thousands of km away).
+        val realGps = hasGps && hasRealLocation(lat, lon)
+        return DiscoveredContact(
+            pubKeyHex = pubKeyHex,
+            nodeHex = nodeHex,
+            name = name,
+            source = source,
+            nodeType = nodeType,
+            hasGps = realGps,
+            lat = lat,
+            lon = lon,
+            sigVerified = sigVerified,
+            lastAdvertisedMs = lastAdvertisedMs,
+            nodeAdvertisedMs = nodeAdvertisedMs,
+            firstSeenMs = firstSeen,
+            networkCode = networkCode.ifBlank { existing?.networkCode.orEmpty() },
+            // Keep any previously-synced analyzer data unless this call provides a fresh blob.
+            analyzerData = analyzerData ?: existing?.analyzerData.orEmpty(),
         )
     }
 

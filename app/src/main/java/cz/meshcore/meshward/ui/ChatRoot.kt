@@ -54,11 +54,14 @@ private sealed class Dest(val depth: Int) {
     data object Networks : Dest(2)
     data object About : Dest(2)
     data object Debug : Dest(2)
+    data object ConnectionLog : Dest(3)
     data object ManageIdentities : Dest(1)
     data class Conversation(val peer: String) : Dest(1)
     data class Profile(val peer: String) : Dest(2)
     data class NetworkDetail(val code: String) : Dest(2)
-    data class Trace(val peer: String) : Dest(3)
+    // Standalone Trace tool. [prefill] (a node hex) seeds the in-screen node selector when opened
+    // from a profile; empty means the screen opens with no node chosen.
+    data class Trace(val prefill: String = "") : Dest(3)
 
     /**
      * Stable key for the saveable-state holder, so each screen's `rememberSaveable` state
@@ -70,7 +73,8 @@ private sealed class Dest(val depth: Int) {
             is Conversation -> "conv:$peer"
             is Profile -> "profile:$peer"
             is NetworkDetail -> "network:$code"
-            is Trace -> "trace:$peer"
+            // Standalone: one Trace screen, so its state is shared regardless of prefill.
+            is Trace -> "Trace"
             else -> this::class.simpleName ?: "dest"
         }
 
@@ -80,7 +84,7 @@ private sealed class Dest(val depth: Int) {
             key.startsWith("conv:") -> Conversation(key.removePrefix("conv:"))
             key.startsWith("profile:") -> Profile(key.removePrefix("profile:"))
             key.startsWith("network:") -> NetworkDetail(key.removePrefix("network:"))
-            key.startsWith("trace:") -> Trace(key.removePrefix("trace:"))
+            key == "Trace" -> Trace()
             key == "Settings" -> Settings
             key == "RxLog" -> RxLog
             key == "MeshCoreLog" -> MeshCoreLog
@@ -88,6 +92,7 @@ private sealed class Dest(val depth: Int) {
             key == "Networks" -> Networks
             key == "About" -> About
             key == "Debug" -> Debug
+            key == "ConnectionLog" -> ConnectionLog
             key == "ManageIdentities" -> ManageIdentities
             else -> Tabs
         }
@@ -180,7 +185,7 @@ fun ChatRoot(vm: ChatViewModel) {
         // navigation, so backing out to a tab list returns you to where you were scrolled.
         stateHolder.SaveableStateProvider(dest.saveableKey) {
         when (dest) {
-            is Dest.Trace -> TraceScreen(vm, dest.peer, onBack = popTop)
+            is Dest.Trace -> TraceScreen(vm, dest.prefill, onBack = popTop)
             is Dest.Profile -> ProfileScreen(
                 vm, dest.peer,
                 onBack = popTop,
@@ -233,7 +238,8 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenProfile = { push(Dest.Profile(it)) },
             )
             Dest.About -> AboutScreen(onBack = popTop)
-            Dest.Debug -> DebugScreen(vm, onBack = popTop)
+            Dest.Debug -> DebugScreen(vm, onBack = popTop, onOpenConnectionLog = { push(Dest.ConnectionLog) })
+            Dest.ConnectionLog -> ConnectionLogScreen(vm, onBack = popTop)
             Dest.ManageIdentities -> ManageIdentitiesScreen(vm, onBack = popTop)
             Dest.Tabs -> TabsScaffold(
                 vm,

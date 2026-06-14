@@ -71,8 +71,8 @@ fun NetworkScreen(
         topology.filter { it.publicKey.size == 32 }
             .associate { it.nodeId.toHex() to it.publicKey.toHex() }
     }
-    // A direct peer is always reachable, so the Trace button targets the first one.
-    val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex()
+    // Standalone Trace tool; seed it with a healthy direct peer when we have one, else open empty.
+    val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex().orEmpty()
 
     Scaffold(
         topBar = {
@@ -106,8 +106,7 @@ fun NetworkScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     FilledTonalButton(
-                        onClick = { traceTarget?.let(nav.openTrace) },
-                        enabled = traceTarget != null,
+                        onClick = { nav.openTrace(traceTarget) },
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(Icons.Default.Route, contentDescription = null, modifier = Modifier.size(18.dp))

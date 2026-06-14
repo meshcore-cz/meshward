@@ -21,17 +21,22 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -43,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,14 +59,33 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.sidepath.protocol.NodeId
 import cz.meshcore.sidepath.protocol.TraceResponseBody
 
+/**
+ * Standalone Trace route tool. The target node is chosen here via the selector at the top — the
+ * screen is not bound to any one node. [prefill] (a node hex) seeds the selector and auto-runs one
+ * trace when arriving from a node's profile; otherwise the user picks a node and presses Trace.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TraceScreen(vm: ChatViewModel, peerHex: String, onBack: () -> Unit) {
+fun TraceScreen(vm: ChatViewModel, prefill: String, onBack: () -> Unit) {
     val trace by vm.trace.collectAsState()
-    val title = vm.nameForHex(peerHex)
+    val topo by vm.topology.collectAsState()
+    val contacts by vm.contacts.collectAsState()
 
-    // Kick off an automatic trace when the page opens; the user can re-run with a custom route.
-    LaunchedEffect(peerHex) { vm.startTrace(peerHex) }
+    var target by rememberSaveable { mutableStateOf(prefill) }
+
+    // Traceable nodes: everything we've heard (topology) or saved (contacts), minus self. Keep the
+    // prefilled target even if it isn't in topology (e.g. a discovered contact), so it stays shown.
+    val candidates = remember(topo, contacts, target) {
+        val me = vm.myNodeHex()
+        (topo.map { it.nodeId.toHex() } + contacts.map { it.nodeHex } +
+            listOfNotNull(target.takeIf { it.isNotBlank() }))
+            .filter { it != me }
+            .distinct()
+            .sortedBy { vm.nameForHex(it).lowercase() }
+    }
+
+    // Coming from a profile: run one trace automatically against the prefilled node.
+    LaunchedEffect(prefill) { if (prefill.isNotBlank()) vm.startTrace(prefill) }
 
     val back = {
         vm.clearTrace()
@@ -70,19 +95,9 @@ fun TraceScreen(vm: ChatViewModel, peerHex: String, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             androidx.compose.material3.TopAppBar(
-                title = {
-                    Column {
-                        Text("Trace route", fontWeight = FontWeight.SemiBold)
-                        Text(title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                },
+                title = { Text("Trace route", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
                     IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                },
-                actions = {
-                    IconButton(onClick = { vm.startTrace(peerHex) }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Trace again (auto route)")
-                    }
                 },
             )
         },
@@ -92,19 +107,83 @@ fun TraceScreen(vm: ChatViewModel, peerHex: String, onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            CustomRoutePanel(vm, peerHex)
+            TargetSelector(vm, candidates, target) { target = it; vm.clearTrace() }
+
+            Button(
+                onClick = { vm.startTrace(target) },
+                enabled = target.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Route, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Trace")
+            }
+
+            if (target.isBlank()) {
+                Text(
+                    "Pick a node above, then press Trace.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+
+            val title = vm.nameForHex(target)
+            CustomRoutePanel(vm, target)
 
             HorizontalDivider()
 
             val t = trace
             when {
-                t == null || t.peerHex != peerHex -> Loading("Starting trace…")
+                t == null || t.peerHex != target ->
+                    Text(
+                        "Press Trace to find the route to $title.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 t.error != null -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(t.error!!, color = MaterialTheme.colorScheme.error)
-                    Button(onClick = { vm.startTrace(peerHex) }) { Text("Try again (auto route)") }
+                    Button(onClick = { vm.startTrace(target) }) { Text("Try again (auto route)") }
                 }
                 t.running -> Loading("Tracing route to $title…")
-                t.result != null -> TraceResultView(t.result!!, t.rttMs, vm) { vm.startTrace(peerHex) }
+                t.result != null -> TraceResultView(t.result!!, t.rttMs, vm) { vm.startTrace(target) }
+            }
+        }
+    }
+}
+
+/** Top-of-screen dropdown for choosing which node to trace. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TargetSelector(
+    vm: ChatViewModel,
+    candidates: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = if (selected.isBlank()) "Select a node" else vm.nameForHex(selected)
+
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = label,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Node to trace") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth(),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (candidates.isEmpty()) {
+                DropdownMenuItem(text = { Text("No known nodes yet") }, onClick = {}, enabled = false)
+            }
+            candidates.forEach { hex ->
+                DropdownMenuItem(
+                    text = { Text(vm.nameForHex(hex)) },
+                    onClick = { onSelect(hex); expanded = false },
+                )
             }
         }
     }

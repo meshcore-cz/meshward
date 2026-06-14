@@ -4,6 +4,7 @@ import android.os.Build
 import android.os.Debug
 import android.os.Process
 import android.os.SystemClock
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,7 +17,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -49,7 +52,7 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DebugScreen(vm: ChatViewModel, onBack: () -> Unit) {
+fun DebugScreen(vm: ChatViewModel, onBack: () -> Unit, onOpenConnectionLog: () -> Unit = {}) {
     val context = LocalContext.current
     // Manual refresh re-reads the database stats; a 2s tick keeps the live runtime metrics moving.
     var refresh by remember { mutableIntStateOf(0) }
@@ -108,6 +111,25 @@ fun DebugScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 DebugRow("Node ID", nodeId.toHex().ifBlank { "—" }, mono = true)
                 DebugRow("Name", name.ifBlank { "—" })
                 DebugRow("Public key", pub.ifBlank { "—" }, mono = true)
+            }
+
+            Card(Modifier.fillMaxWidth().clickable(onClick = onOpenConnectionLog)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Sensors, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Column(Modifier.weight(1f)) {
+                        Text("Connection log", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            "Scans, discovered nodes, connect attempts, failures & disconnections",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
 
             DebugSection("Mesh metrics") {

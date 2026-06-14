@@ -140,10 +140,11 @@ private fun ConnectionStatusSheet(
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex()
+                // Standalone Trace tool; seed it with a healthy peer when we have one, else open empty
+                // and let the user pick a node in the screen.
+                val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex().orEmpty()
                 FilledTonalButton(
-                    onClick = { traceTarget?.let { onDismiss(); nav.openTrace(it) } },
-                    enabled = traceTarget != null,
+                    onClick = { onDismiss(); nav.openTrace(traceTarget) },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     modifier = Modifier.weight(1f),
                 ) {
