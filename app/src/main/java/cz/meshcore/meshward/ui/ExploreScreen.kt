@@ -72,6 +72,7 @@ fun ExploreScreen(
 ) {
     val discovered by vm.discoveredContacts.collectAsState()
     val activeNetwork by vm.activeNetwork.collectAsState()
+    val topology by vm.topology.collectAsState()
     val detectedNetworks by vm.detectedNetworks.collectAsState()
     val networkAuto by vm.networkAuto.collectAsState()
     val chatItems by vm.chatItems.collectAsState()
@@ -182,15 +183,23 @@ fun ExploreScreen(
                     modifier = Modifier.padding(padding),
                 )
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                activeNetwork?.let { net ->
+                val activeNet = activeNetwork
+                if (activeNet != null) {
+                    val bridgeCount = topology.count { e -> e.bridges.any { it.code == activeNet.code } }
                     item {
                         ActiveNetworkCard(
-                            code = net.code,
-                            name = net.name,
-                            summary = networkRadioSummary(net),
+                            code = activeNet.code,
+                            name = activeNet.name,
+                            summary = networkRadioSummary(activeNet),
                             autoDetected = networkAuto,
-                            onClick = { onOpenNetworkDetail(net.code) },
+                            bridgeCount = bridgeCount,
+                            onClick = { onOpenNetworkDetail(activeNet.code) },
                         )
+                    }
+                } else if (discovered.any { it.source == DiscoverySource.MESHCORE }) {
+                    // MeshCore traffic with no network detected/pinned — surface it as "Unknown network".
+                    item {
+                        UnknownNetworkCard(onClick = { onOpenNetworkDetail(cz.meshcore.meshward.UNKNOWN_NETWORK_CODE) })
                     }
                 }
                 if (showLocationBanner) {
@@ -317,9 +326,18 @@ private fun AnalyzerSyncButton(syncing: Boolean, onClick: () -> Unit) {
  * or pinned manually.
  */
 @Composable
-private fun ActiveNetworkCard(code: String, name: String, summary: String, autoDetected: Boolean, onClick: () -> Unit) {
+private fun ActiveNetworkCard(
+    code: String,
+    name: String,
+    summary: String,
+    autoDetected: Boolean,
+    bridgeCount: Int,
+    onClick: () -> Unit,
+) {
+    // Accent-tinted (primaryContainer) to match the active network detail page's header box.
+    val subtle = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
     Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer,
+        color = MaterialTheme.colorScheme.primaryContainer,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = onClick),
     ) {
@@ -332,17 +350,55 @@ private fun ActiveNetworkCard(code: String, name: String, summary: String, autoD
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(name.ifBlank { code }, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(Icons.Default.Hub, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Hub, contentDescription = null, tint = subtle, modifier = Modifier.size(13.dp))
+                    val detection = if (autoDetected) "auto-detected" else "manual"
+                    val bridges = if (bridgeCount > 0) " · $bridgeCount ${if (bridgeCount == 1) "bridge" else "bridges"}" else ""
                     Text(
-                        if (autoDetected) "Meshcore network · auto-detected" else "Meshcore network · manual",
+                        "Meshcore network · $detection$bridges",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = subtle,
                         maxLines = 1,
                     )
                 }
                 if (summary.isNotBlank()) {
                     Text(
                         summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = subtle,
+                        maxLines = 1,
+                    )
+                }
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = subtle,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+/** Explore card shown when MeshCore traffic arrives but no network is detected/pinned. */
+@Composable
+private fun UnknownNetworkCard(onClick: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = onClick),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            NetworkCodeChip(cz.meshcore.meshward.UNKNOWN_NETWORK_CODE)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Unknown network", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.Hub, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(13.dp))
+                    Text(
+                        "MeshCore traffic with no network detected",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

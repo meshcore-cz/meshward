@@ -25,7 +25,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -69,71 +72,61 @@ private sealed class Dest(val depth: Int) {
             is Trace -> "trace:$peer"
             else -> this::class.simpleName ?: "dest"
         }
+
+    companion object {
+        /** Inverse of [saveableKey], used to restore the back stack across process death. */
+        fun fromKey(key: String): Dest = when {
+            key.startsWith("conv:") -> Conversation(key.removePrefix("conv:"))
+            key.startsWith("profile:") -> Profile(key.removePrefix("profile:"))
+            key.startsWith("network:") -> NetworkDetail(key.removePrefix("network:"))
+            key.startsWith("trace:") -> Trace(key.removePrefix("trace:"))
+            key == "Settings" -> Settings
+            key == "RxLog" -> RxLog
+            key == "MeshCoreLog" -> MeshCoreLog
+            key == "Topology" -> Topology
+            key == "Networks" -> Networks
+            key == "About" -> About
+            key == "Debug" -> Debug
+            else -> Tabs
+        }
+    }
 }
+
+/** Persists the navigation back stack (as its destination keys) across process death. */
+private val DestStackSaver = androidx.compose.runtime.saveable.listSaver<SnapshotStateList<Dest>, String>(
+    save = { stack -> stack.map { it.saveableKey } },
+    restore = { keys -> keys.map(Dest::fromKey).toMutableStateList() },
+)
 
 @Composable
 fun ChatRoot(vm: ChatViewModel) {
-    var openPeer by rememberSaveable { mutableStateOf<String?>(null) }
-    var openProfile by rememberSaveable { mutableStateOf<String?>(null) }
-    var openTrace by rememberSaveable { mutableStateOf<String?>(null) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
-    var showRxLog by rememberSaveable { mutableStateOf(false) }
-    var showMeshCoreLog by rememberSaveable { mutableStateOf(false) }
-    var showTopology by rememberSaveable { mutableStateOf(false) }
-    var showAbout by rememberSaveable { mutableStateOf(false) }
-    var showDebug by rememberSaveable { mutableStateOf(false) }
-    var showNetworks by rememberSaveable { mutableStateOf(false) }
-    var openNetworkDetail by rememberSaveable { mutableStateOf<String?>(null) }
+    // A real push/pop back stack: each navigation pushes a destination, Back pops the last one, so
+    // backing out always returns to the screen you came from (e.g. NetworkDetail → bridge profile →
+    // back returns to NetworkDetail, not the tab). The tabs are the implicit base (empty stack).
+    val backStack = rememberSaveable(saver = DestStackSaver) { mutableStateListOf<Dest>() }
     var tab by rememberSaveable { mutableStateOf(0) }
 
-    // A meshcore:// deep link (contact/channel) asks us to open its conversation.
+    fun push(dest: Dest) {
+        if (backStack.lastOrNull() != dest) backStack.add(dest)
+    }
+
+    // A meshcore:// deep link (contact/channel) resets to that conversation.
     val pendingOpen by vm.pendingOpenPeer.collectAsState()
     LaunchedEffect(pendingOpen) {
         pendingOpen?.let {
-            openProfile = null; openTrace = null
-            openPeer = it
+            backStack.clear()
+            backStack.add(Dest.Conversation(it))
             vm.consumePendingOpen()
         }
     }
 
-    // The top-most destination, recomputed from the navigation flags. Trace sits above a
-    // profile, which sits above a conversation, which sits above the tabs — so backing out
-    // unwinds in that order.
-    val top: Dest = when {
-        openTrace != null -> Dest.Trace(openTrace!!)
-        showAbout -> Dest.About
-        showDebug -> Dest.Debug
-        openNetworkDetail != null -> Dest.NetworkDetail(openNetworkDetail!!)
-        openProfile != null -> Dest.Profile(openProfile!!)
-        openPeer != null -> Dest.Conversation(openPeer!!)
-        showNetworks -> Dest.Networks
-        showTopology -> Dest.Topology
-        showMeshCoreLog -> Dest.MeshCoreLog
-        showRxLog -> Dest.RxLog
-        showSettings -> Dest.Settings
-        else -> Dest.Tabs
-    }
+    val top: Dest = backStack.lastOrNull() ?: Dest.Tabs
 
     val popTop = {
-        when (top) {
-            is Dest.Trace -> {
-                vm.clearTrace()
-                openTrace = null
-            }
-            Dest.About -> showAbout = false
-            Dest.Debug -> showDebug = false
-            is Dest.NetworkDetail -> openNetworkDetail = null
-            is Dest.Profile -> openProfile = null
-            is Dest.Conversation -> openPeer = null
-            Dest.Networks -> showNetworks = false
-            Dest.MeshCoreLog -> showMeshCoreLog = false
-            Dest.Topology -> showTopology = false
-            Dest.RxLog -> showRxLog = false
-            Dest.Settings -> showSettings = false
-            Dest.Tabs -> Unit
-        }
+        val popped = backStack.removeLastOrNull()
+        if (popped is Dest.Trace) vm.clearTrace()
     }
-    BackHandler(enabled = top !is Dest.Tabs) { popTop() }
+    BackHandler(enabled = backStack.isNotEmpty()) { popTop() }
 
     val activeConversationPeer = (top as? Dest.Conversation)?.peer
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -161,11 +154,11 @@ fun ChatRoot(vm: ChatViewModel) {
         // App-wide mesh navigation: Trace and Rx Log are reachable from any universal
         // component (e.g. the connection-status sheet) without threading callbacks.
         LocalMeshNav provides MeshNav(
-            openTrace = { openTrace = it },
-            openRxLog = { showRxLog = true },
-            openMeshCoreLog = { showMeshCoreLog = true },
-            openTopology = { showTopology = true },
-            openProfile = { openProfile = it },
+            openTrace = { push(Dest.Trace(it)) },
+            openRxLog = { push(Dest.RxLog) },
+            openMeshCoreLog = { push(Dest.MeshCoreLog) },
+            openTopology = { push(Dest.Topology) },
+            openProfile = { push(Dest.Profile(it)) },
         ),
     ) {
     AnimatedContent(
@@ -189,55 +182,53 @@ fun ChatRoot(vm: ChatViewModel) {
             is Dest.Profile -> ProfileScreen(
                 vm, dest.peer,
                 onBack = popTop,
-                onOpenConversation = { openProfile = null; openPeer = it },
-                onTrace = { openTrace = it },
-                onOpenProfile = { openProfile = it },
-                // Profile (depth 2) outranks Settings (depth 1) in `top`, so close the profile
-                // first; otherwise Settings would never surface.
-                onOpenSettings = { openProfile = null; showSettings = true },
-                // NetworkDetail outranks Profile, so it layers on top; back returns to the profile.
-                onOpenNetworkDetail = { openNetworkDetail = it },
+                onOpenConversation = { push(Dest.Conversation(it)) },
+                onTrace = { push(Dest.Trace(it)) },
+                onOpenProfile = { push(Dest.Profile(it)) },
+                onOpenSettings = { push(Dest.Settings) },
+                onOpenNetworkDetail = { push(Dest.NetworkDetail(it)) },
             )
             is Dest.Conversation -> ConversationScreen(
                 vm, dest.peer,
                 onBack = popTop,
-                onOpenProfile = { openProfile = it },
+                onOpenProfile = { push(Dest.Profile(it)) },
             )
             Dest.Settings -> SettingsScreen(
                 vm,
                 onBack = popTop,
-                onOpenProfile = { openProfile = it },
-                onOpenAbout = { showAbout = true },
-                onOpenDebug = { showDebug = true },
-                onOpenNetworks = { showNetworks = true },
+                onOpenProfile = { push(Dest.Profile(it)) },
+                onOpenAbout = { push(Dest.About) },
+                onOpenDebug = { push(Dest.Debug) },
+                onOpenNetworks = { push(Dest.Networks) },
             )
             Dest.Networks -> NetworksScreen(
                 vm,
                 onBack = popTop,
-                onOpenDetail = { openNetworkDetail = it },
+                onOpenDetail = { push(Dest.NetworkDetail(it)) },
             )
             is Dest.NetworkDetail -> NetworkDetailScreen(
                 vm, dest.code,
                 onBack = popTop,
-                // "Change network" jumps to Settings → Meshcore Networks; close the detail first so
-                // the Networks screen surfaces (it's outranked by NetworkDetail in `top`).
-                onOpenNetworks = { openNetworkDetail = null; showNetworks = true },
+                onOpenNetworks = { push(Dest.Networks) },
+                onOpenProfile = { push(Dest.Profile(it)) },
+                // The active network is a MeshCore bridge, so its log is the MeshCore Rx Log.
+                onOpenRxLog = { push(Dest.MeshCoreLog) },
             )
             Dest.RxLog -> RxLogScreen(
                 vm,
                 onBack = popTop,
-                onOpenProfile = { openProfile = it },
-                onOpenMeshCoreLog = { showMeshCoreLog = true },
+                onOpenProfile = { push(Dest.Profile(it)) },
+                onOpenMeshCoreLog = { push(Dest.MeshCoreLog) },
             )
             Dest.MeshCoreLog -> MeshCoreRxLogScreen(
                 vm,
                 onBack = popTop,
-                onOpenProfile = { openProfile = it },
+                onOpenProfile = { push(Dest.Profile(it)) },
             )
             Dest.Topology -> TopologyScreen(
                 vm,
                 onBack = popTop,
-                onOpenProfile = { openProfile = it },
+                onOpenProfile = { push(Dest.Profile(it)) },
             )
             Dest.About -> AboutScreen(onBack = popTop)
             Dest.Debug -> DebugScreen(vm, onBack = popTop)
@@ -245,11 +236,11 @@ fun ChatRoot(vm: ChatViewModel) {
                 vm,
                 tab = tab,
                 onSelectTab = { tab = it },
-                onOpenConversation = { openPeer = it },
-                onOpenProfile = { openProfile = it },
-                onOpenSettings = { showSettings = true },
-                onOpenAbout = { showAbout = true },
-                onOpenNetworkDetail = { openNetworkDetail = it },
+                onOpenConversation = { push(Dest.Conversation(it)) },
+                onOpenProfile = { push(Dest.Profile(it)) },
+                onOpenSettings = { push(Dest.Settings) },
+                onOpenAbout = { push(Dest.About) },
+                onOpenNetworkDetail = { push(Dest.NetworkDetail(it)) },
             )
         }
         }

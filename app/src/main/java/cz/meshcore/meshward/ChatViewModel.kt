@@ -103,6 +103,12 @@ const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
 const val DEFAULT_NETWORK_CODE = "CZ"
 
 /**
+ * Sentinel network code for MeshCore traffic heard without a known network (no bridge advertised one).
+ * Surfaced on Explore as an "Unknown network" card and opens an informational detail (no statistics).
+ */
+const val UNKNOWN_NETWORK_CODE = "?"
+
+/**
  * Default URL the "Refresh definitions" action pulls the network-definitions dataset from. Placeholder
  * until the canonical sidepath-protocol-hosted URL is provided; the refresh plumbing is otherwise live.
  */
