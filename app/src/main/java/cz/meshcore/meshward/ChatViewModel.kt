@@ -1250,7 +1250,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun handleTraceResponse(msg: ReceivedMessage) {
         val result = msg.traceResponse ?: return
         val cur = _trace.value ?: return
-        if (cur.tag != null && cur.tag.toLong() == result.tag) {
+        // sendTrace() truncates the unsigned 32-bit tag into a signed Int, so sign-extend back to the
+        // unsigned value before comparing — otherwise tags with the high bit set never match.
+        if (cur.tag != null && (cur.tag.toLong() and 0xFFFFFFFFL) == result.tag) {
             val rtt = (System.currentTimeMillis() - cur.startedAtMs).coerceAtLeast(0)
             _trace.value = cur.copy(running = false, rttMs = rtt, result = result)
         }
