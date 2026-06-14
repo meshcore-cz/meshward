@@ -91,7 +91,7 @@ private val LOCATION_PROMPT_DISMISSED_KEY = booleanPreferencesKey("location_prom
 private val LOCATION_LAT_KEY = doublePreferencesKey("location_lat")
 private val LOCATION_LON_KEY = doublePreferencesKey("location_lon")
 private val LOCATION_PRECISION_KEY = stringPreferencesKey("location_precision")
-// The manually pinned Meshcore Network code (its short code, e.g. "CZ"), used only when auto is off.
+// The manually pinned MeshCore Network code (its short code, e.g. "CZ"), used only when auto is off.
 private val ACTIVE_NETWORK_CODE_KEY = stringPreferencesKey("active_network_code")
 // Whether the active network is auto-detected from heard bridges (default) vs. manually pinned.
 private val NETWORK_AUTO_KEY = booleanPreferencesKey("network_auto")
@@ -99,7 +99,7 @@ private val NETWORK_AUTO_KEY = booleanPreferencesKey("network_auto")
 /** Default MeshCore packet analyzer base URL; the content hash is appended. */
 const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
 
-/** The Meshcore Network pinned by default (used only as the manual fallback before auto-detection). */
+/** The MeshCore Network pinned by default (used only as the manual fallback before auto-detection). */
 const val DEFAULT_NETWORK_CODE = "CZ"
 
 /**
@@ -109,10 +109,9 @@ const val DEFAULT_NETWORK_CODE = "CZ"
 const val UNKNOWN_NETWORK_CODE = "?"
 
 /**
- * Default URL the "Refresh definitions" action pulls the network-definitions dataset from. Placeholder
- * until the canonical sidepath-protocol-hosted URL is provided; the refresh plumbing is otherwise live.
+ * Default URL the "Refresh definitions" action pulls the canonical network-definitions dataset from.
  */
-const val DEFAULT_NETWORK_DEFS_URL = "https://raw.githubusercontent.com/meshcore-cz/sidepath-protocol/main/networks.json"
+const val DEFAULT_NETWORK_DEFS_URL = "https://raw.githubusercontent.com/meshcore-cz/sidepath-protocol/refs/heads/main/res/networks.json"
 
 /** How long a discovered contact survives after it was last heard advertising. */
 private const val DISCOVERED_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
@@ -202,6 +201,10 @@ data class ProfileInfo(
     val peerHex: String,
     val isChannel: Boolean,
     val name: String,
+    // True when [name] is a user-chosen name (a Rename, our own set node name, or a channel name),
+    // false when it's only the node's announce/derived name. Drives whether the Rename field prefills
+    // the value (editable) or shows it as a placeholder over an empty field.
+    val nameIsCustom: Boolean = false,
     val nodeHex: String = "",
     val pubKeyHex: String = "",
     val isContact: Boolean = false,
@@ -225,7 +228,7 @@ data class ProfileInfo(
     val lon: Double = 0.0,
     val sigVerified: Boolean = false,
     val nodeAdvertisedMs: Long = 0L,
-    // Meshcore Network this node was tiered to at discovery (the bridge network it came through).
+    // MeshCore Network this node was tiered to at discovery (the bridge network it came through).
     // Set for MeshCore nodes heard via a gateway; blank otherwise.
     val networkCode: String = "",
 )
@@ -271,9 +274,43 @@ data class AdvertisedNode(
     val pubKeyHex: String,
 )
 
+/** One identity (profile) as shown in the avatar chooser / manage screen. */
+data class IdentityUi(
+    val id: String,
+    val label: String,
+    val pubKeyHex: String,
+    val isActive: Boolean,
+    /** Wall-clock of when this identity was last the active one (0 = never yet, or it's active now). */
+    val lastActiveMs: Long,
+    /** True when [label] is a user-set name (vs the pubkey-derived default) — drives Rename prefill. */
+    val nameIsCustom: Boolean,
+)
+
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val dao = ChatDatabase.get(app).chatDao()
+    // The active identity (profile) and its own Room database. Each identity is fully separated:
+    // its own keypair seed, contacts/chats/channels, and namespaced settings. Read synchronously at
+    // construction so [dao] opens the right database file. See [IdentityStore].
+    private val identityStore = IdentityStore(app)
+    private var identity = identityStore.active()
+
+    private val dao = ChatDatabase.get(app, identity.dbName).chatDao()
+
+    // Per-identity DataStore keys, namespaced by the active identity id (settings don't bleed across
+    // profiles). Device-level keys (theme, avatar style, location) stay shared and un-namespaced.
+    private val nsName = stringPreferencesKey("${identity.id}_name")
+    private val nsDesc = stringPreferencesKey("${identity.id}_description")
+    private val nsDmRetry = intPreferencesKey("${identity.id}_dm_retry_delay_ms")
+    private val nsDmMax = intPreferencesKey("${identity.id}_dm_max_tries")
+    private val nsFloodTtl = intPreferencesKey("${identity.id}_flood_ttl")
+    private val nsPhy = stringPreferencesKey("${identity.id}_phy_mode")
+    private val nsAnalyzer = stringPreferencesKey("${identity.id}_analyzer_urls")
+    private val nsNetCode = stringPreferencesKey("${identity.id}_active_network_code")
+    private val nsNetAuto = booleanPreferencesKey("${identity.id}_network_auto")
+
+    /** One-shot signal to the Activity to relaunch the app (after an identity switch / seed change). */
+    private val _relaunch = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val relaunch: SharedFlow<Unit> = _relaunch.asSharedFlow()
 
     private val _service = MutableStateFlow<SidepathService?>(null)
     private var serviceBound = false
@@ -343,7 +380,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val exploreHideSaved: StateFlow<Boolean> = _exploreHideSaved.asStateFlow()
     fun setExploreHideSaved(v: Boolean) { _exploreHideSaved.value = v }
 
-    // ---- Meshcore Networks (auto-detected from bridge announces) --------------
+    // ---- MeshCore Networks (auto-detected from bridge announces) --------------
     // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
     // cached on disk; user-added ones live in the DB as custom overrides. The effective list is the
     // union, deduped by code. The active network is auto-detected from nearby gateway bridges by
@@ -541,6 +578,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val lastMeshCorePacketAtMs: StateFlow<Long?> = meshCorePackets
         .map { it.firstOrNull()?.timestampMs }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
+     * Our receive time of the last MeshCore packet attributed to the **active** network, falling back
+     * to the global last-packet time when the active network has no per-network-tagged traffic (e.g.
+     * it was detected from a gateway announce only). Always our own wall clock — both [packetNetworkSeen]
+     * and [lastMeshCorePacketAtMs] are stamped on receive, never from a remote in-packet timestamp — so
+     * Explore's network card shows a stable age that can't jump to another network's packet or a peer's
+     * clock. Null until the active network is known and traffic has been heard.
+     */
+    val activeNetworkLastPacketMs: StateFlow<Long?> =
+        combine(activeNetwork, packetNetworkSeen, lastMeshCorePacketAtMs) { net, seen, global ->
+            net?.code?.let { seen[it] } ?: global
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Wall-clock time of the most recent received packet, or null if none yet. */
     val lastPacketAtMs: StateFlow<Long?> = rxPackets
@@ -775,29 +825,62 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         ctx.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    private suspend fun initializeService(service: SidepathService) {
+    /**
+     * One-time copy of the pre-identity (un-namespaced) settings into the legacy identity's namespace,
+     * so the migrated identity #0 keeps its name/description/network/etc. Idempotent (guarded by a
+     * per-identity flag); a no-op for any non-legacy identity.
+     */
+    private suspend fun migrateLegacyPrefsIfNeeded() {
+        if (!identity.isLegacy) return
         val ctx = getApplication<Application>()
         val pref = ctx.dataStore.data.first()
-        val seedHex = pref[SEED_KEY] ?: generateSeedHex().also { gen ->
-            ctx.dataStore.edit { it[SEED_KEY] = gen }
+        val flag = booleanPreferencesKey("${identity.id}_migrated")
+        if (pref[flag] == true) return
+        ctx.dataStore.edit { e ->
+            pref[NAME_KEY]?.let { e[nsName] = it }
+            pref[DESC_KEY]?.let { e[nsDesc] = it }
+            pref[DM_RETRY_DELAY_KEY]?.let { e[nsDmRetry] = it }
+            pref[DM_MAX_TRIES_KEY]?.let { e[nsDmMax] = it }
+            pref[FLOOD_TTL_KEY]?.let { e[nsFloodTtl] = it }
+            pref[PHY_MODE_KEY]?.let { e[nsPhy] = it }
+            pref[ANALYZER_URLS_KEY]?.let { e[nsAnalyzer] = it }
+            pref[ACTIVE_NETWORK_CODE_KEY]?.let { e[nsNetCode] = it }
+            pref[NETWORK_AUTO_KEY]?.let { e[nsNetAuto] = it }
+            e[flag] = true
         }
-        val desc = pref[DESC_KEY] ?: ""
-        val nodeName = pref[NAME_KEY] ?: ""
-        val retryDelay = pref[DM_RETRY_DELAY_KEY] ?: DEFAULT_DM_RETRY_DELAY_MS
-        val maxTries = pref[DM_MAX_TRIES_KEY] ?: DEFAULT_DM_MAX_TRIES
-        val phy = PHYMode.fromString(pref[PHY_MODE_KEY] ?: PHYMode.ONE_M.value)
+    }
+
+    private suspend fun initializeService(service: SidepathService) {
+        val ctx = getApplication<Application>()
+        migrateLegacyPrefsIfNeeded()
+        val pref = ctx.dataStore.data.first()
+        // Seed comes from the active identity's registry entry. The migrated legacy identity starts
+        // blank — resolve it from the old DataStore seed (or generate) and persist into the registry.
+        val seedHex = identity.seedHex.ifBlank {
+            (pref[SEED_KEY] ?: generateSeedHex()).also {
+                identityStore.setSeed(identity.id, it)
+                identity = identity.copy(seedHex = it)
+                // The registry now knows the legacy identity's seed, so its avatar/label can resolve.
+                refreshIdentities()
+            }
+        }
+        val desc = pref[nsDesc] ?: ""
+        val nodeName = pref[nsName] ?: ""
+        val retryDelay = pref[nsDmRetry] ?: DEFAULT_DM_RETRY_DELAY_MS
+        val maxTries = pref[nsDmMax] ?: DEFAULT_DM_MAX_TRIES
+        val phy = PHYMode.fromString(pref[nsPhy] ?: PHYMode.ONE_M.value)
         _seedHex.value = seedHex
         _description.value = desc
         _name.value = nodeName
         _dmRetryDelayMs.value = retryDelay
         _dmMaxTries.value = maxTries
-        _floodTtl.value = (pref[FLOOD_TTL_KEY] ?: Sidepath.DEFAULT_FLOOD_TTL).coerceIn(1, Sidepath.MAX_TTL)
+        _floodTtl.value = (pref[nsFloodTtl] ?: Sidepath.DEFAULT_FLOOD_TTL).coerceIn(1, Sidepath.MAX_TTL)
         _avatarStyle.value = AvatarStyle.fromValue(pref[AVATAR_STYLE_KEY])
         _themeMode.value = ThemeMode.fromValue(pref[THEME_KEY])
-        _analyzerUrls.value = parseAnalyzerUrls(pref[ANALYZER_URLS_KEY])
+        _analyzerUrls.value = parseAnalyzerUrls(pref[nsAnalyzer])
 
-        val identity = Identity.fromSeed(seedHex.hexToBytes())
-        service.initialize(identity, phy, emptySet(), desc, nodeName, retryDelay.toLong(), maxTries)
+        val node = Identity.fromSeed(seedHex.hexToBytes())
+        service.initialize(node, phy, emptySet(), desc, nodeName, retryDelay.toLong(), maxTries)
         ensurePublicChannel()
     }
 
@@ -822,14 +905,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Load display preferences early so the theme/avatars are right before the service binds.
         viewModelScope.launch {
+            migrateLegacyPrefsIfNeeded()
+            refreshIdentities()
             val pref = getApplication<Application>().dataStore.data.first()
             _avatarStyle.value = AvatarStyle.fromValue(pref[AVATAR_STYLE_KEY])
             _themeMode.value = ThemeMode.fromValue(pref[THEME_KEY])
             _locationEnabled.value = pref[LOCATION_ENABLED_KEY] ?: false
             _locationPromptDismissed.value = pref[LOCATION_PROMPT_DISMISSED_KEY] ?: false
             _locationPrecision.value = LocationPrecision.fromValue(pref[LOCATION_PRECISION_KEY])
-            _activeNetworkCode.value = pref[ACTIVE_NETWORK_CODE_KEY] ?: DEFAULT_NETWORK_CODE
-            _networkAuto.value = pref[NETWORK_AUTO_KEY] ?: true
+            _activeNetworkCode.value = pref[nsNetCode] ?: DEFAULT_NETWORK_CODE
+            _networkAuto.value = pref[nsNetAuto] ?: true
             val lat = pref[LOCATION_LAT_KEY]
             val lon = pref[LOCATION_LON_KEY]
             if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)
@@ -856,7 +941,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- Meshcore Networks ----------------------------------------------------
+    // ---- MeshCore Networks ----------------------------------------------------
 
     /**
      * Pins the device to the network with [code] and turns auto-detection off (a manual pick is an
@@ -865,8 +950,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setActiveNetwork(code: String) {
         viewModelScope.launch {
             getApplication<Application>().dataStore.edit {
-                it[ACTIVE_NETWORK_CODE_KEY] = code
-                it[NETWORK_AUTO_KEY] = false
+                it[nsNetCode] = code
+                it[nsNetAuto] = false
             }
             _activeNetworkCode.value = code
             _networkAuto.value = false
@@ -876,7 +961,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Toggles auto-detection of the active network from heard bridges (persisted across restarts). */
     fun setNetworkAuto(auto: Boolean) {
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[NETWORK_AUTO_KEY] = auto }
+            getApplication<Application>().dataStore.edit { it[nsNetAuto] = auto }
             _networkAuto.value = auto
         }
     }
@@ -1528,6 +1613,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Adds a contact from a manually entered (or QR-scanned) public key + optional name, so it shows
+     * in Chats. Returns the new peer's node hex to open the conversation, or null if [publicKeyHex]
+     * isn't a valid 64-hex Ed25519 key.
+     */
+    fun addContactManually(publicKeyHex: String, name: String): String? {
+        val pub = publicKeyHex.trim().lowercase()
+        if (pub.length != 64 || pub.any { it !in "0123456789abcdef" }) return null
+        val nodeHex = pub.take(Sidepath.NODE_ID_BYTES * 2)
+        val alias = name.trim()
+        viewModelScope.launch {
+            val existing = dao.contactByNode(nodeHex)
+            dao.upsertContact(
+                Contact(nodeHex, pub, existing?.description.orEmpty(),
+                    localName = alias.ifBlank { existing?.localName.orEmpty() },
+                    isMeshCore = existing?.isMeshCore ?: false,
+                    nameIsCustom = alias.isNotBlank() || (existing?.nameIsCustom ?: false)),
+            )
+        }
+        return nodeHex
+    }
+
+    /**
      * Adds [peerHex] to contacts (from a discovered node or the topology) so it appears in Chats,
      * resolving its public key and carrying over MeshCore origin / advertised name. Used when
      * starting a chat from a discovered node's profile. No-op if it's already a contact.
@@ -1565,6 +1672,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     peerHex = peerHex,
                     isChannel = true,
                     name = ch?.name ?: "Channel",
+                    nameIsCustom = !ch?.name.isNullOrBlank(),
                     channelKind = ch?.kind ?: "",
                     channelHash = ch?.hashByte ?: 0,
                     pskHex = psk,
@@ -1575,6 +1683,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     peerHex = peerHex,
                     isChannel = false,
                     name = myName.value.ifBlank { shortHex(peerHex) },
+                    nameIsCustom = myName.value.isNotBlank(),
                     nodeHex = peerHex,
                     pubKeyHex = myPubKeyHex.value,
                     isContact = false,
@@ -1606,6 +1715,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     peerHex = peerHex,
                     isChannel = false,
                     name = name,
+                    nameIsCustom = contact?.nameIsCustom == true,
                     nodeHex = peerHex,
                     pubKeyHex = pub,
                     isContact = isContact,
@@ -1907,7 +2017,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setDescription(text: String) {
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[DESC_KEY] = text }
+            getApplication<Application>().dataStore.edit { it[nsDesc] = text }
             _description.value = text
             _service.value?.setDescription(text)
         }
@@ -1919,8 +2029,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val tries = maxTries.coerceIn(1, 10)
         viewModelScope.launch {
             getApplication<Application>().dataStore.edit {
-                it[DM_RETRY_DELAY_KEY] = delay
-                it[DM_MAX_TRIES_KEY] = tries
+                it[nsDmRetry] = delay
+                it[nsDmMax] = tries
             }
             _dmRetryDelayMs.value = delay
             _dmMaxTries.value = tries
@@ -1932,7 +2042,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setFloodTtl(ttl: Int) {
         val clamped = ttl.coerceIn(1, Sidepath.MAX_TTL)
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[FLOOD_TTL_KEY] = clamped }
+            getApplication<Application>().dataStore.edit { it[nsFloodTtl] = clamped }
             _floodTtl.value = clamped
         }
     }
@@ -1957,7 +2067,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setAnalyzerUrls(text: String) {
         val list = parseAnalyzerUrls(text)
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[ANALYZER_URLS_KEY] = list.joinToString("\n") }
+            getApplication<Application>().dataStore.edit { it[nsAnalyzer] = list.joinToString("\n") }
             _analyzerUrls.value = list
         }
     }
@@ -1966,7 +2076,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setName(text: String) {
         val clean = text.trim()
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[NAME_KEY] = clean }
+            getApplication<Application>().dataStore.edit { it[nsName] = clean }
             _name.value = clean
             _service.value?.setName(clean)
         }
@@ -1974,33 +2084,145 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setPhyMode(mode: PHYMode) {
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[PHY_MODE_KEY] = mode.value }
+            getApplication<Application>().dataStore.edit { it[nsPhy] = mode.value }
             _service.value?.setPhyMode(mode)
         }
     }
 
-    /** Replaces the identity seed (64 hex chars) and restarts the mesh node. */
+    /** Replaces the active identity's seed (64 hex chars) and restarts the mesh node (same data). */
     fun applySeed(hex: String): Boolean {
         val clean = hex.trim().lowercase()
-        if (clean.length != Sidepath.SEED_BYTES * 2 || !clean.all { it in "0123456789abcdef" }) return false
+        if (!isValidSeed(clean)) return false
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit {
-                it[SEED_KEY] = clean
-                // Switching mesh invalidates the previously detected/pinned MeshCore network: it belonged
-                // to the old mesh. Drop back to auto-detect so the active network reads none until the new
-                // mesh surfaces one (a manual pin would otherwise carry the stale network across).
-                it[NETWORK_AUTO_KEY] = true
-            }
+            identityStore.setSeed(identity.id, clean)
+            identity = identity.copy(seedHex = clean)
+            // Switching keypair invalidates the previously detected/pinned MeshCore network: drop back
+            // to auto-detect so the active network reads none until the mesh surfaces one again.
+            getApplication<Application>().dataStore.edit { it[nsNetAuto] = true }
             _seedHex.value = clean
             _networkAuto.value = true
             processed.clear()
             restartService()
+            refreshIdentities()
         }
         return true
     }
 
     fun regenerateSeed() {
         applySeed(generateSeedHex())
+    }
+
+    private fun isValidSeed(hex: String): Boolean =
+        hex.length == Sidepath.SEED_BYTES * 2 && hex.all { it in "0123456789abcdef" }
+
+    // ---- Identity manager (multiple fully-separated profiles) ------------------
+
+    private val _identities = MutableStateFlow<List<IdentityUi>>(emptyList())
+    /** All identities (profiles), for the avatar chooser + manage screen. */
+    val identities: StateFlow<List<IdentityUi>> = _identities.asStateFlow()
+
+    /** The active identity's id. */
+    val activeIdentityId: String get() = identity.id
+
+    private suspend fun refreshIdentities() {
+        val pref = getApplication<Application>().dataStore.data.first()
+        _identities.value = identityStore.all().map { ref ->
+            val pub = runCatching { Identity.fromSeed(ref.seedHex.hexToBytes()).publicKey.toHex() }.getOrDefault("")
+            val customName = pref[stringPreferencesKey("${ref.id}_name")].orEmpty()
+            val label = customName
+                .ifBlank { if (pub.isNotBlank()) nameFromPubKey(pub) else "" }
+                .ifBlank { "Identity ${ref.id}" }
+            IdentityUi(
+                id = ref.id,
+                label = label,
+                pubKeyHex = pub,
+                isActive = ref.id == identity.id,
+                lastActiveMs = ref.lastActiveMs,
+                nameIsCustom = customName.isNotBlank(),
+            )
+        }
+    }
+
+    /** A freshly generated random seed (64 hex), for the "Generate" action in the add-identity dialog. */
+    fun freshSeedHex(): String = generateSeedHex()
+
+    /**
+     * The 32-byte public key (hex) a seed would yield, for live preview in the add-identity dialog.
+     * Blank when [seedHex] isn't a valid 64-hex seed yet (so the UI can hide the preview).
+     */
+    fun publicKeyForSeed(seedHex: String): String {
+        val clean = seedHex.trim().lowercase()
+        if (!isValidSeed(clean)) return ""
+        return runCatching { Identity.fromSeed(clean.hexToBytes()).publicKey.toHex() }.getOrDefault("")
+    }
+
+    /** Creates a fresh identity (new keypair + empty data) and switches to it. */
+    fun addIdentity() {
+        viewModelScope.launch {
+            val ref = identityStore.create()
+            identityStore.setActive(ref.id)
+            _relaunch.emit(Unit)
+        }
+    }
+
+    /** Adds an identity from an existing 64-hex seed and switches to it. Returns false if invalid. */
+    fun importIdentity(hex: String): Boolean {
+        val clean = hex.trim().lowercase()
+        if (!isValidSeed(clean)) return false
+        viewModelScope.launch {
+            val ref = identityStore.create(clean)
+            identityStore.setActive(ref.id)
+            _relaunch.emit(Unit)
+        }
+        return true
+    }
+
+    /** Switches the active identity and relaunches the app into it. */
+    fun switchIdentity(id: String) {
+        if (id == identity.id) return
+        viewModelScope.launch {
+            identityStore.setActive(id)
+            _relaunch.emit(Unit)
+        }
+    }
+
+    /** Deletes an identity (its DB + settings). No-op for the active or last identity. */
+    fun deleteIdentity(id: String) {
+        if (id == identity.id) return
+        viewModelScope.launch {
+            identityStore.delete(getApplication(), id)
+            getApplication<Application>().dataStore.edit { p ->
+                p.remove(stringPreferencesKey("${id}_name"))
+                p.remove(stringPreferencesKey("${id}_description"))
+                p.remove(intPreferencesKey("${id}_dm_retry_delay_ms"))
+                p.remove(intPreferencesKey("${id}_dm_max_tries"))
+                p.remove(intPreferencesKey("${id}_flood_ttl"))
+                p.remove(stringPreferencesKey("${id}_phy_mode"))
+                p.remove(stringPreferencesKey("${id}_analyzer_urls"))
+                p.remove(stringPreferencesKey("${id}_active_network_code"))
+                p.remove(booleanPreferencesKey("${id}_network_auto"))
+                p.remove(booleanPreferencesKey("${id}_migrated"))
+            }
+            refreshIdentities()
+        }
+    }
+
+    /** The seed (64 hex) of an identity, for backup/export in the manage screen. */
+    fun seedForIdentity(id: String): String = identityStore.all().firstOrNull { it.id == id }?.seedHex.orEmpty()
+
+    /** Renames an identity. The active one flows through [setName] (updates the live node too). */
+    fun renameIdentity(id: String, name: String) {
+        val clean = name.trim()
+        if (clean.isBlank()) return
+        if (id == identity.id) {
+            setName(clean)
+            viewModelScope.launch { refreshIdentities() }
+            return
+        }
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[stringPreferencesKey("${id}_name")] = clean }
+            refreshIdentities()
+        }
     }
 
     private fun restartService() {

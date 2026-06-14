@@ -168,7 +168,7 @@ fun ProfileScreen(
             }
 
             // Mark bridged MeshCore identities — they're full contacts but not directly DM-reachable.
-            // When the node was tiered to a Meshcore Network, show its code chip; tapping opens the
+            // When the node was tiered to a MeshCore Network, show its code chip; tapping opens the
             // network's detail.
             if (profile.isMeshCore) {
                 Spacer(Modifier.size(6.dp))
@@ -375,6 +375,7 @@ fun ProfileScreen(
         RenameDialog(
             current = profile.name,
             isChannel = profile.isChannel,
+            nameIsCustom = profile.nameIsCustom,
             onConfirm = { name ->
                 if (profile.isChannel) vm.renameChannel(profile.pskHex, name)
                 else vm.renameContact(profile.nodeHex, name)
@@ -785,12 +786,14 @@ private fun InfoRow(label: String, value: String) {
 private fun RenameDialog(
     current: String,
     isChannel: Boolean,
+    nameIsCustom: Boolean,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // Start empty with the current name only as a placeholder — leaving it blank keeps the
-    // current name (no need to clear the field first just to rename).
-    var text by remember { mutableStateOf("") }
+    // A custom name (a previous Rename) is editable text the user can delete/adjust. An announce/
+    // derived name is shown only as a placeholder over an empty field, so they type from scratch and
+    // leaving it blank keeps the current name.
+    var text by remember { mutableStateOf(if (nameIsCustom) current else "") }
     // Focus the field and pop the keyboard as soon as the dialog appears.
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }

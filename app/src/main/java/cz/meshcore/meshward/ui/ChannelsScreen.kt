@@ -64,7 +64,7 @@ fun JoinChannelSheet(
         ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             .setBeepEnabled(false)
-            .setOrientationLocked(false)
+            .setOrientationLocked(true)
             .setPrompt("Scan a MeshCore channel QR"),
     )
 

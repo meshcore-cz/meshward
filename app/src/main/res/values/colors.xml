@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launch window / splash background. Matches Compose's light color scheme surface so the
+         pre-first-frame window doesn't flash a different colour. Overridden in values-night. -->
+    <color name="window_background">#FFFBFE</color>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode launch window / splash background. Matches Compose's darkColorScheme() surface
+         (#1C1B1F) so a phone in dark mode opens to a dark screen, not a white flash. -->
+    <color name="window_background">#1C1B1F</color>
+</resources>

@@ -18,7 +18,9 @@ abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
 
     companion object {
-        @Volatile private var instance: ChatDatabase? = null
+        // One open instance per database file — each identity (profile) has its own file, so the
+        // app may hold several. Keyed by dbName.
+        private val instances = HashMap<String, ChatDatabase>()
 
         // v6→v7: add MeshCore carrier columns to messages. Additive, so migrate in place
         // (preserve joined channels / contacts / history) rather than wiping the store.
@@ -143,8 +145,8 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
-        // v17→v18: add the mesh_networks table (user-added Meshcore Networks; built-in defaults are
-        // loaded from assets/networks.json, not stored here). Additive — migrate in place.
+        // v17→v18: add the mesh_networks table (user-added MeshCore Networks; built-in defaults are
+        // bundled by sidepath-protocol from res/networks.json, not stored here). Additive — migrate in place.
         private val MIGRATION_17_18 = object : Migration(17, 18) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
@@ -182,14 +184,14 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
-        fun get(context: Context): ChatDatabase = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(
+        fun get(context: Context, dbName: String = "meshward.db"): ChatDatabase = synchronized(this) {
+            instances[dbName] ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
-                "meshward.db",
+                dbName,
             ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21)
                 .fallbackToDestructiveMigration()
-                .build().also { instance = it }
+                .build().also { instances[dbName] = it }
         }
     }
 }

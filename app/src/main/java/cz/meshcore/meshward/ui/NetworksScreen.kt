@@ -55,7 +55,7 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.data.MeshNetwork
 
 /**
- * Manage Meshcore Networks: pick the active one, view details, and add/edit/delete custom networks.
+ * Manage MeshCore Networks: pick the active one, view details, and add/edit/delete custom networks.
  * Built-in presets (from the sidepath-protocol definitions dataset) can be selected and "Customized"
  * (an editable copy is stored under the same code), but not deleted.
  */
@@ -92,7 +92,7 @@ fun NetworksScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Meshcore Networks") },
+                title = { Text("MeshCore Networks") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -107,7 +107,7 @@ fun NetworksScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Your device operates in one Meshcore Network at a time. It's auto-detected from nearby " +
+                "Your device operates in one MeshCore Network at a time. It's auto-detected from nearby " +
                     "bridge announces; turn that off to pin one manually. Radio parameters are shown for " +
                     "reference and don't reconfigure the radio.",
                 style = MaterialTheme.typography.bodySmall,
@@ -390,7 +390,7 @@ private fun NetworkEditForm(
     }
 }
 
-/** The Meshcore network accent (the former MeshCore badge teal), shared by every network code chip. */
+/** The MeshCore network accent (the former MeshCore badge teal), shared by every network code chip. */
 val NetworkChipColor = androidx.compose.ui.graphics.Color(0xFF00838F)
 
 /** A monospace pill showing a network's short code, e.g. `CZ`. Shared across network surfaces. */

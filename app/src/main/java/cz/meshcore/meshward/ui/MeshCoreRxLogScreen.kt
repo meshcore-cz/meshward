@@ -263,7 +263,7 @@ private fun meshCoreMeta(env: MeshCoreEnvelope?): String {
 @Composable
 internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    // Analyzers come from the active Meshcore network's CoreScope endpoints (Settings → Networks).
+    // Analyzers come from the active MeshCore network's CoreScope endpoints (Settings → Networks).
     val activeNetwork by vm.activeNetwork.collectAsState()
     val networks by vm.networks.collectAsState()
     val analyzers = remember(activeNetwork, networks) { vm.activeNetworkAnalyzers() }

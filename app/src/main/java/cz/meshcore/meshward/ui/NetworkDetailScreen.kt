@@ -50,7 +50,7 @@ import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.parseAnalyzerEndpoints
 
-/** Extended overview of a single Meshcore Network: identity, tech parameters, links, and territory. */
+/** Extended overview of a single MeshCore Network: identity, tech parameters, links, and territory. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NetworkDetailScreen(
@@ -79,7 +79,7 @@ fun NetworkDetailScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Meshcore Network Details") },
+                title = { Text("MeshCore Network") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -120,7 +120,7 @@ fun NetworkDetailScreen(
                         LiveStatusLine(if (isAutoDetected) "Live · active network · auto-detected" else "Live · active network")
                     } else {
                         Text(
-                            if (isAutoDetected) "Meshcore network · detected nearby" else "Meshcore network",
+                            if (isAutoDetected) "MeshCore network · detected nearby" else "MeshCore network",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -139,7 +139,7 @@ fun NetworkDetailScreen(
                                 Text("Rx Log")
                             }
                         }
-                        // Manage detection / pinning lives in Settings → Meshcore Networks.
+                        // Manage detection / pinning lives in Settings → MeshCore Networks.
                         OutlinedButton(onClick = onOpenNetworks) {
                             Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.size(6.dp))
@@ -317,13 +317,13 @@ private fun UnknownNetworkDetail(modifier: Modifier = Modifier) {
                     Text("Unknown network", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 }
                 Text(
-                    "Meshcore network",
+                    "MeshCore network",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
                     "MeshCore packets are arriving without an identified network — no nearby bridge is " +
-                        "advertising which Meshcore network it bridges. Once a bridge announces its network, " +
+                        "advertising which MeshCore network it bridges. Once a bridge announces its network, " +
                         "these contacts will be tiered to it automatically.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

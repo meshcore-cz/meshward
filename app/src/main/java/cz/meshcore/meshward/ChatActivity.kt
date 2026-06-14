@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -57,6 +58,11 @@ class ChatActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Draw edge-to-edge on every OS version (a transparent status/nav bar that our TopAppBar and
+        // bottom bar draw under). Android 15 (targetSdk 35) forces this on, but older versions don't —
+        // without it they fell back to the Material Light theme's grey statusBarColor, mismatching the
+        // app header. The per-frame SideEffect below still sets the bar icon colour from the app theme.
+        enableEdgeToEdge()
         handleDeepLink(intent)
         setContent {
             val themeMode by viewModel.themeMode.collectAsState()
@@ -84,10 +90,26 @@ class ChatActivity : ComponentActivity() {
                             permissionLauncher.launch(requiredPermissions)
                         }
                     }
+                    LaunchedEffect(Unit) {
+                        viewModel.relaunch.collect { relaunchForIdentitySwitch() }
+                    }
                     ChatRoot(viewModel)
                 }
             }
         }
+    }
+
+    /**
+     * Switches to the selected identity: stop the current node cleanly, then relaunch the app from
+     * scratch. Finishing the task clears the [androidx.lifecycle.ViewModelStore], so the new Activity
+     * builds a fresh [ChatViewModel] bound to the now-active identity's DB + seed.
+     */
+    private fun relaunchForIdentitySwitch() {
+        stopService(Intent(this, cz.meshcore.sidepath.service.SidepathService::class.java))
+        val launch = packageManager.getLaunchIntentForPackage(packageName)
+            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) }
+        if (launch != null) startActivity(launch)
+        finish()
     }
 
     // singleTop: a meshcore:// link tapped while we're already running arrives here.

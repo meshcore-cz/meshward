@@ -54,6 +54,7 @@ private sealed class Dest(val depth: Int) {
     data object Networks : Dest(2)
     data object About : Dest(2)
     data object Debug : Dest(2)
+    data object ManageIdentities : Dest(1)
     data class Conversation(val peer: String) : Dest(1)
     data class Profile(val peer: String) : Dest(2)
     data class NetworkDetail(val code: String) : Dest(2)
@@ -87,6 +88,7 @@ private sealed class Dest(val depth: Int) {
             key == "Networks" -> Networks
             key == "About" -> About
             key == "Debug" -> Debug
+            key == "ManageIdentities" -> ManageIdentities
             else -> Tabs
         }
     }
@@ -232,6 +234,7 @@ fun ChatRoot(vm: ChatViewModel) {
             )
             Dest.About -> AboutScreen(onBack = popTop)
             Dest.Debug -> DebugScreen(vm, onBack = popTop)
+            Dest.ManageIdentities -> ManageIdentitiesScreen(vm, onBack = popTop)
             Dest.Tabs -> TabsScaffold(
                 vm,
                 tab = tab,
@@ -241,6 +244,7 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenSettings = { push(Dest.Settings) },
                 onOpenAbout = { push(Dest.About) },
                 onOpenNetworkDetail = { push(Dest.NetworkDetail(it)) },
+                onOpenManageIdentities = { push(Dest.ManageIdentities) },
             )
         }
         }
@@ -258,6 +262,7 @@ private fun TabsScaffold(
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenNetworkDetail: (String) -> Unit,
+    onOpenManageIdentities: () -> Unit,
 ) {
     val conversations by vm.conversations.collectAsState()
     val unread = remember(conversations) { conversations.sumOf { it.unread } }
@@ -304,6 +309,7 @@ private fun TabsScaffold(
                     onOpenProfile = onOpenProfile,
                     onOpenSettings = onOpenSettings,
                     onOpenAbout = onOpenAbout,
+                    onOpenManageIdentities = onOpenManageIdentities,
                 )
                 1 -> ExploreScreen(
                     vm,

@@ -145,7 +145,7 @@ fun SettingsScreen(
                 }
             }
 
-            // Meshcore Network (the regional preset this device operates in)
+            // MeshCore Network (the regional preset this device operates in)
             Card(
                 Modifier.fillMaxWidth().clickable(onClick = onOpenNetworks),
             ) {
@@ -156,7 +156,7 @@ fun SettingsScreen(
                     Icon(Icons.Default.Public, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.size(14.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Meshcore Networks", style = MaterialTheme.typography.titleMedium)
+                        Text("MeshCore Networks", style = MaterialTheme.typography.titleMedium)
                         Text(
                             activeNetwork?.let { "Active: ${it.code} · ${it.name}" }
                                 ?: "Choose your regional network",

@@ -1,5 +1,6 @@
 package cz.meshcore.meshward.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,7 +20,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -27,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -44,9 +48,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import cz.meshcore.meshward.AdvertisedNode
 import cz.meshcore.meshward.ChatListItem
 import cz.meshcore.meshward.ChatViewModel
+import cz.meshcore.meshward.MeshCoreUri
 import cz.meshcore.meshward.data.ChannelKind
 import cz.meshcore.meshward.nameFromPubKey
 
@@ -58,6 +65,7 @@ fun ChatsScreen(
     onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenManageIdentities: () -> Unit,
 ) {
     val items by vm.chatItems.collectAsState()
     val discovered by vm.discoveredContacts.collectAsState()
@@ -67,6 +75,8 @@ fun ChatsScreen(
     val myName by vm.myName.collectAsState()
     val myPubKeyHex by vm.myPubKeyHex.collectAsState()
     var chooser by remember { mutableStateOf(false) }
+    var identitySheet by remember { mutableStateOf(false) }
+    var showAddIdentity by remember { mutableStateOf(false) }
     var showNewChat by remember { mutableStateOf(false) }
     var showJoin by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
@@ -83,8 +93,8 @@ fun ChatsScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    // Tapping your own avatar opens your profile (Settings is in the ⋮ menu).
-                    IconButton(onClick = { onOpenProfile(myNode.toHex()) }) {
+                    // Tapping your own avatar opens the identity chooser (switch profile, add, manage).
+                    IconButton(onClick = { identitySheet = true }) {
                         Avatar(
                             seed = myNode.toHex(),
                             label = myName.ifBlank { "Me" },
@@ -152,8 +162,21 @@ fun ChatsScreen(
         }
     }
 
+    if (identitySheet) {
+        IdentitySheet(
+            vm = vm,
+            onAddIdentity = { showAddIdentity = true },
+            onManage = onOpenManageIdentities,
+            onMyProfile = { onOpenProfile(myNode.toHex()) },
+            onDismiss = { identitySheet = false },
+        )
+    }
+    if (showAddIdentity) {
+        AddIdentityDialog(vm = vm, onDismiss = { showAddIdentity = false })
+    }
     if (chooser) {
         AddChooserSheet(
+            vm = vm,
             onNewChat = { chooser = false; showNewChat = true },
             onJoinChannel = { chooser = false; showJoin = true },
             onDismiss = { chooser = false },
@@ -162,10 +185,9 @@ fun ChatsScreen(
     if (showNewChat) {
         NewChatSheet(
             vm = vm,
-            onPick = { node ->
-                vm.startChat(node)
+            onStartChat = { peerHex ->
                 showNewChat = false
-                onOpenConversation(node.nodeHex)
+                onOpenConversation(peerHex)
             },
             onDismiss = { showNewChat = false },
         )
@@ -264,14 +286,42 @@ internal fun ChatRow(
     }
 }
 
-/** The "+" chooser: start a contact chat or join a channel. */
+/** The "+" chooser: start a chat or join a channel. A QR scan (top-right) handles either kind of
+ *  `meshcore://` link (contact or channel) and routes it straight to the opened conversation. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddChooserSheet(onNewChat: () -> Unit, onJoinChannel: () -> Unit, onDismiss: () -> Unit) {
+private fun AddChooserSheet(
+    vm: ChatViewModel,
+    onNewChat: () -> Unit,
+    onJoinChannel: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scan = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents ?: return@rememberLauncherForActivityResult
+        // handleSharedUri joins/adds and triggers navigation to the conversation; just close the sheet.
+        if (vm.handleSharedUri(contents)) onDismiss()
+    }
+    fun launchScan() = scan.launch(
+        ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setBeepEnabled(false)
+            .setOrientationLocked(true)
+            .setPrompt("Scan a MeshCore contact or channel QR"),
+    )
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-            Text("Add", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-            ChooserRow(Icons.Default.PersonAdd, "New contact chat", "Message a nearby node directly", onNewChat)
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Add", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { launchScan() }) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan QR code")
+                }
+            }
+            ChooserRow(Icons.Default.PersonAdd, "New chat", "Add a contact by key, QR, or nearby node", onNewChat)
             HorizontalDivider()
             ChooserRow(Icons.Default.Public, "Join channel", "Public, named, or secret group channel", onJoinChannel)
         }
@@ -320,28 +370,93 @@ private fun EmptyState(modifier: Modifier, searching: Boolean) {
     }
 }
 
+/**
+ * New chat: add a contact by pasting their public key (+ optional name), scanning their QR (top-right
+ * or the field's trailing icon), or tapping one of the nearby Sidepath nodes at the bottom. Each path
+ * adds the contact and opens the conversation via [onStartChat].
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewChatSheet(vm: ChatViewModel, onPick: (AdvertisedNode) -> Unit, onDismiss: () -> Unit) {
+private fun NewChatSheet(vm: ChatViewModel, onStartChat: (String) -> Unit, onDismiss: () -> Unit) {
     val nodes by vm.advertisedNodes.collectAsState()
+    var pubKey by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+
+    // Scan a contact QR → pre-fill the key + name fields (user reviews, then taps Start chat).
+    val scan = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents ?: return@rememberLauncherForActivityResult
+        MeshCoreUri.parseContact(contents)?.let { c ->
+            pubKey = c.publicKeyHex
+            name = c.name
+        }
+    }
+    fun launchScan() = scan.launch(
+        ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setBeepEnabled(false)
+            .setOrientationLocked(true)
+            .setPrompt("Scan a contact QR"),
+    )
+    val cleanKey = pubKey.trim().lowercase()
+    val validKey = cleanKey.length == 64 && cleanKey.all { it in "0123456789abcdef" }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("New chat", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { launchScan() }) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan contact QR")
+                }
+            }
             Text(
-                "New chat",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(16.dp),
+                "Add a contact by public key, scan their QR, or pick a nearby node below.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (nodes.isEmpty()) {
-                Text(
-                    "No nodes discovered yet. Make sure another Sidepath node is nearby and advertising.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            } else {
+            OutlinedTextField(
+                value = pubKey,
+                onValueChange = { pubKey = it.trim() },
+                label = { Text("Public key (64 hex)") },
+                singleLine = true,
+                isError = pubKey.isNotEmpty() && !validKey,
+                trailingIcon = {
+                    IconButton(onClick = { launchScan() }) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan QR")
+                    }
+                },
+                supportingText = {
+                    if (pubKey.isNotEmpty() && !validKey) Text("Must be exactly 64 hexadecimal characters.")
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { vm.addContactManually(pubKey, name)?.let(onStartChat) },
+                enabled = validKey,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Start chat") }
+
+            if (nodes.isNotEmpty()) {
+                HorizontalDivider()
+                Text("Nearby Sidepath nodes", style = MaterialTheme.typography.labelLarge)
                 nodes.forEach { node ->
                     Row(
-                        Modifier.fillMaxWidth().clickable { onPick(node) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        Modifier.fillMaxWidth()
+                            .clickable { vm.startChat(node); onStartChat(node.nodeHex) }
+                            .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         val label = nameFromPubKey(node.pubKeyHex).ifBlank { node.nodeHex.take(16) }

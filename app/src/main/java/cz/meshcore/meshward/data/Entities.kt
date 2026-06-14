@@ -28,7 +28,7 @@ data class Channel(
 )
 
 /**
- * A "Meshcore Network" — a named region/profile the device can operate in (e.g. "CZ"). Bundles the
+ * A "MeshCore Network" — a named region/profile the device can operate in (e.g. "CZ"). Bundles the
  * LoRa tech parameters (informational/display only for now — these do NOT reconfigure the radio),
  * useful links, and an optional geographic territory as a GeoJSON geometry. Keyed by its short
  * [code] (≤5 chars). Built-in defaults come from the sidepath-protocol definitions dataset (bundled
@@ -88,7 +88,7 @@ data class DiscoveredContact(
     val lastAdvertisedMs: Long = 0L,
     val nodeAdvertisedMs: Long = 0L,
     val firstSeenMs: Long = 0L,
-    // Meshcore Network this contact was tiered to at discovery (the network of the bridge it came
+    // MeshCore Network this contact was tiered to at discovery (the network of the bridge it came
     // through). Set for MeshCore contacts heard via a gateway; blank for Sidepath-native nodes.
     val networkCode: String = "",
     // Extra node metadata fetched from a CoreScope analyzer's /api/nodes (scores, relay counts,

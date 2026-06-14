@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.Meshward" parent="android:Theme.Material.Light.NoActionBar"/>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Launch theme. windowBackground (and the Android 12+ splash background) use a day/night
+         colour so the window shown before Compose's first frame follows the system dark mode
+         instead of always being white. Compose owns all real UI + theming once it draws. -->
+    <style name="Theme.Meshward" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/window_background</item>
+    </style>
 </resources>

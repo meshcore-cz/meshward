@@ -92,7 +92,7 @@ fun ExploreScreen(
     val meshCoreTrafficSeen by vm.meshCoreTrafficSeen.collectAsState()
     val savedContactKeys by vm.savedContactKeys.collectAsState()
     val meshCoreTotal by vm.meshCoreTotal.collectAsState()
-    val lastMeshCorePacketAtMs by vm.lastMeshCorePacketAtMs.collectAsState()
+    val lastMeshCorePacketAtMs by vm.activeNetworkLastPacketMs.collectAsState()
     val isRunning by vm.isRunning.collectAsState()
     // Ticks once a second so the active-network card's "last packet" age stays current.
     val nowMs by produceState(initialValue = System.currentTimeMillis()) {
@@ -380,8 +380,8 @@ private fun LiveDot(pulseKey: Any?, modifier: Modifier = Modifier) {
 }
 
 /**
- * Compact header card on Explore showing the active Meshcore Network; taps through to its detail.
- * Clarifies that this is the Meshcore network and whether it was auto-detected from a nearby bridge
+ * Compact header card on Explore showing the active MeshCore Network; taps through to its detail.
+ * Clarifies that this is the MeshCore network and whether it was auto-detected from a nearby bridge
  * or pinned manually.
  */
 @Composable
@@ -429,7 +429,7 @@ private fun ActiveNetworkCard(
                     val detection = if (autoDetected) "auto-detected" else "manual"
                     val bridges = if (bridgeCount > 0) " · $bridgeCount ${if (bridgeCount == 1) "bridge" else "bridges"}" else ""
                     Text(
-                        "Meshcore network · $detection$bridges",
+                        "MeshCore network · $detection$bridges",
                         style = MaterialTheme.typography.bodySmall,
                         color = subtle,
                         maxLines = 1,
