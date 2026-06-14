@@ -249,11 +249,11 @@ fun channelLabel(name: String, kind: String): String =
 val mentionRegex = Regex("""@\[([^\]]+)\]""")
 
 /**
- * Number of intermediate relays a packet passed through. The stored route is the packet
- * trace, whose last hop is always this node, so relays = hops − 1 (0 = direct).
+ * Number of intermediate relays a packet passed through. The stored route is the datagram `path`,
+ * which records relays only (excludes the endpoints), so the relay count is its length (0 = direct).
  */
 fun relayCount(routeHex: String): Int =
-    (routeHex.split(",").count { it.isNotBlank() } - 1).coerceAtLeast(0)
+    routeHex.split(",").count { it.isNotBlank() }
 
 /** Compact "direct / N relays" chip shown on a message bubble. */
 @Composable
@@ -580,9 +580,9 @@ fun MessageDetailsSheet(
             DetailRow("Origin", if (msg.viaMeshCore) "MeshCore (bridged)" else "Sidepath")
 
             val relays = relayCount(msg.routeHex)
-            // Real intermediate relays only — drop the final hop (always this node); the
-            // sender/recipient endpoints aren't shown.
-            val relayHops = msg.routeHex.split(",").filter { it.isNotBlank() }.dropLast(1)
+            // The stored `path` already holds intermediate relays only (endpoints excluded), in
+            // travel order from nearest the sender to nearest us.
+            val relayHops = msg.routeHex.split(",").filter { it.isNotBlank() }
             DetailRow("Delivery", when {
                 msg.routeHex.isBlank() -> when {
                     msg.incoming -> "—"
