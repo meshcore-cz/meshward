@@ -695,6 +695,7 @@ fun MessageDetailsSheet(
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (msg.networkCode.isNotBlank()) DetailRow("Network", msg.networkCode)
                 if (msg.meshCoreType.isNotBlank()) DetailRow("Type", msg.meshCoreType)
                 if (pathHashSize > 0) DetailRow("Path hash size", "$pathHashSize byte${if (pathHashSize == 1) "" else "s"}")
                 if (msg.meshCorePacketId.isNotBlank()) DetailRow("Packet", msg.meshCorePacketId)

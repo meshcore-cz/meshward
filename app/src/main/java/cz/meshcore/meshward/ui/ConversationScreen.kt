@@ -160,6 +160,9 @@ fun ConversationScreen(
     val contactIndex by vm.contactNameIndex.collectAsState()
     // Emoji reactions, grouped by target message id.
     val reactionsByMsg by vm.reactions.collectAsState()
+    // The network this channel is currently bridged on — shown on the MeshCore chips in place of the
+    // generic "MeshCore" label. Blank when no network is active (falls back to "MeshCore").
+    val activeNetwork by vm.activeNetwork.collectAsState()
     val myHex = vm.myNodeHex()
 
     // Outgoing typing hints are STARTED only from a genuine user edit (see the input's
@@ -433,6 +436,7 @@ fun ConversationScreen(
                         repeatCount, dmDeliveries[msg.id], onMentionClick,
                         reactions = reactionsByMsg[msg.id].orEmpty(),
                         myHex = myHex,
+                        networkCode = activeNetwork?.code.orEmpty(),
                         mentionResolved = { name -> resolveName(name) != null },
                         onChipClick = { emoji -> reactionsEmoji = emoji; reactionsFor = msg },
                         onLongPress = { actionsFor = msg },
@@ -744,11 +748,11 @@ private fun ReactionTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** The teal MeshCore-bridge pill, shared by incoming and outgoing messages. [arrow] points the way
- * the message crossed the bridge (in for received, out for relayed); [label] is the hop-byte count
- * (e.g. "3B") where known, else "MeshCore". */
+/** The teal MeshCore-bridge pill, shared by incoming and outgoing messages. [arrow] (optional) points
+ * the way the message crossed the bridge (in for received, out for relayed); [label] is the network
+ * code or the hop count. */
 @Composable
-private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
+private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector?, label: String) {
     Surface(
         color = Color(0xFF00838F).copy(alpha = 0.16f),
         shape = RoundedCornerShape(6.dp),
@@ -758,12 +762,14 @@ private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector,
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            Icon(
-                arrow,
-                contentDescription = null,
-                modifier = Modifier.size(11.dp),
-                tint = Color(0xFF00838F),
-            )
+            if (arrow != null) {
+                Icon(
+                    arrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(11.dp),
+                    tint = Color(0xFF00838F),
+                )
+            }
             Text(
                 label,
                 style = MaterialTheme.typography.labelSmall,
@@ -773,24 +779,32 @@ private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector,
     }
 }
 
-/** Marks an incoming channel message that arrived over the MeshCore bridge. The inbound arrow and
- * the LoRa hop count ([hops]) replace the old mesh logo + "MeshCore" label. */
+/** Marks an incoming channel message that arrived over the MeshCore bridge: an inbound-arrow pill with
+ * the bridged network code ([networkCode], or "MeshCore" when unknown), followed by a matching pill
+ * with the LoRa hop count ([hops]). */
 @Composable
-private fun MeshCoreBadge(hops: Int) =
-    MeshCorePill(
-        Icons.AutoMirrored.Filled.CallReceived,
-        when {
-            hops <= 0 -> "direct"
-            hops == 1 -> "1 hop"
-            else -> "$hops hops"
-        },
-    )
+private fun MeshCoreBadge(hops: Int, networkCode: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        MeshCorePill(Icons.AutoMirrored.Filled.CallReceived, networkCode.ifBlank { "MeshCore" })
+        MeshCorePill(
+            null,
+            when {
+                hops <= 0 -> "direct"
+                hops == 1 -> "1 hop"
+                else -> "$hops hops"
+            },
+        )
+    }
+}
 
-/** Marks our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). The bridge
- * originates the packet at hop 0, so there is no hop-byte count to show — only the outbound arrow. */
+/** Marks our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). Shows the
+ * outbound arrow and the bridged network code ([networkCode], or "MeshCore" when unknown). */
 @Composable
-private fun BridgedBadge() =
-    MeshCorePill(Icons.AutoMirrored.Filled.CallMade, "MeshCore")
+private fun BridgedBadge(networkCode: String) =
+    MeshCorePill(Icons.AutoMirrored.Filled.CallMade, networkCode.ifBlank { "MeshCore" })
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -805,6 +819,7 @@ private fun MessageBubble(
     onMentionClick: (String) -> Unit,
     reactions: List<cz.meshcore.meshward.data.Reaction>,
     myHex: String,
+    networkCode: String,
     mentionResolved: (String) -> Boolean,
     onChipClick: (String) -> Unit,
     onLongPress: () -> Unit,
@@ -812,6 +827,9 @@ private fun MessageBubble(
 ) {
     val mine = !msg.incoming
     val hasReactions = reactions.isNotEmpty()
+    // The network shown on this message's MeshCore chips: the one recorded on the message, falling
+    // back to the channel's current network for rows saved before it was persisted.
+    val net = msg.networkCode.ifBlank { networkCode }
     Row(
         // Reserve room below for the reaction pills, which overhang the bubble's bottom edge.
         Modifier.fillMaxWidth().padding(bottom = if (hasReactions) 14.dp else 0.dp),
@@ -835,12 +853,12 @@ private fun MessageBubble(
                             fontWeight = FontWeight.SemiBold,
                             modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
                         )
-                        if (msg.viaMeshCore) MeshCoreBadge(msg.meshCoreHops)
+                        if (msg.viaMeshCore) MeshCoreBadge(msg.meshCoreHops, net)
                     }
                 } else if (mine && msg.bridgedToMeshCore) {
                     // Our own message, relayed onto MeshCore — show the bridge pill at the top,
                     // mirroring where the incoming badge sits (after the sender name).
-                    BridgedBadge()
+                    BridgedBadge(net)
                 }
                 MessageContent(
                     msg.text,

@@ -212,6 +212,7 @@ data class ProfileInfo(
     val channelHash: Int = 0,
     val pskHex: String = "",
     val neighborHexes: List<String> = emptyList(), // this node's directly-connected neighbors (from its ANNOUNCE)
+    val bridges: List<cz.meshcore.sidepath.protocol.BridgeAd> = emptyList(), // external networks this gateway bridges (from its ANNOUNCE)
     // MeshCore / discovery info. [isMeshCore] = the node is a bridged MeshCore node (not directly
     // DM-reachable). [isDiscovered] = heard advertising but not yet saved as a contact. The rest
     // mirror the bridged ADVERT and are shown in the profile's MeshCore section.
@@ -338,6 +339,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val exploreSortByDistance: StateFlow<Boolean> = _exploreSortByDistance.asStateFlow()
     fun setExploreSortByDistance(v: Boolean) { _exploreSortByDistance.value = v }
 
+    private val _exploreHideSaved = MutableStateFlow(false) // hide already-saved contacts from Explore
+    val exploreHideSaved: StateFlow<Boolean> = _exploreHideSaved.asStateFlow()
+    fun setExploreHideSaved(v: Boolean) { _exploreHideSaved.value = v }
+
     // ---- Meshcore Networks (auto-detected from bridge announces) --------------
     // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
     // cached on disk; user-added ones live in the DB as custom overrides. The effective list is the
@@ -409,37 +414,69 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
-     * Networks currently detected from verified gateway announces: every distinct bridge `code` heard
-     * in the live topology, resolved against the definitions dataset (custom announce radio params
-     * override the canonical ones), most-recently-announced first. Empty when no bridge is nearby.
+     * Per-network last-heard timestamps from the unsigned SPMC carrier tag (§13.1) embedded in bridged
+     * MeshCore packets — `code → latest packet timestampMs`. A bridge that knows its single network
+     * stamps every packet it floods, so this surfaces the operating network from live traffic, even
+     * before we've heard the gateway's signed ANNOUNCE. Unauthenticated; folded into [detectedNetworks].
+     */
+    private val packetNetworkSeen: StateFlow<Map<String, Long>> =
+        _service.flatMapLatest { it?.meshCorePackets ?: flowOf(emptyList()) }
+            .map { packets ->
+                packets.filter { it.networkCode.isNotBlank() }
+                    .groupBy { it.networkCode }
+                    .mapValues { (_, ps) -> ps.maxOf { it.timestampMs } }
+            }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /**
+     * Networks currently detected from nearby activity, **freshest first** — so the active network
+     * auto-tracks the latest thing we heard. Two sources are merged by code: verified gateway
+     * announces from the live topology (resolved against the definitions dataset, custom announce radio
+     * params overriding canonical ones) and the unsigned network codes embedded in bridged MeshCore
+     * packets ([packetNetworkSeen]). Each code's rank is its most-recent sighting across both sources,
+     * so a just-received packet promotes its network ahead of an older announce. Empty when idle.
      */
     val detectedNetworks: StateFlow<List<MeshNetwork>> =
-        combine(topology, networks) { topo, defs ->
+        combine(topology, networks, packetNetworkSeen) { topo, defs, pktSeen ->
             val byCode = defs.associateBy { it.code }
-            topo.filter { it.bridges.isNotEmpty() }
-                .sortedByDescending { it.lastAnnounceMs }
-                .flatMap { entry -> entry.bridges.map { resolveBridge(it, byCode) } }
-                .distinctBy { it.code }
+            val resolved = LinkedHashMap<String, MeshNetwork>()
+            val lastHeard = HashMap<String, Long>()
+            // Verified gateway announces — these carry any custom radio params.
+            topo.filter { it.bridges.isNotEmpty() }.forEach { entry ->
+                entry.bridges.forEach { b ->
+                    resolved.putIfAbsent(b.code, resolveBridge(b, byCode))
+                    lastHeard[b.code] = maxOf(lastHeard[b.code] ?: 0L, entry.lastAnnounceMs)
+                }
+            }
+            // Unsigned codes embedded in bridged packets (live traffic).
+            pktSeen.forEach { (code, ts) ->
+                resolved.putIfAbsent(code, byCode[code] ?: MeshNetwork(code = code, name = code, isBuiltin = true))
+                lastHeard[code] = maxOf(lastHeard[code] ?: 0L, ts)
+            }
+            resolved.values.sortedByDescending { lastHeard[it.code] ?: 0L }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val isRunning: StateFlow<Boolean> = _service.flatMapLatest {
+        it?.isRunning ?: flowOf(false)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
      * The network this device is operating in: auto-detected (the strongest/most-recent detected
-     * network) when [networkAuto] is on, else the manually pinned [activeNetworkCode]. Null when auto
-     * is on and nothing is detected — callers (Explore) hide the network card in that case.
+     * network) when [networkAuto] is on, else the manually pinned [activeNetworkCode]. Null when the
+     * mesh is stopped, or when auto is on and nothing is detected — callers (Explore) hide the network
+     * card in that case.
      */
     val activeNetwork: StateFlow<MeshNetwork?> =
-        combine(networks, detectedNetworks, _activeNetworkCode, _networkAuto) { all, detected, code, auto ->
-            if (auto) detected.firstOrNull()
-            else all.firstOrNull { it.code == code }
+        combine(networks, detectedNetworks, _activeNetworkCode, _networkAuto, isRunning) { all, detected, code, auto, running ->
+            when {
+                !running -> null
+                auto -> detected.firstOrNull()
+                else -> all.firstOrNull { it.code == code }
+            }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val connectedPeers: StateFlow<List<PeerInfo>> = _service.flatMapLatest {
         it?.connectedPeers ?: flowOf(emptyList())
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-
-    val isRunning: StateFlow<Boolean> = _service.flatMapLatest {
-        it?.isRunning ?: flowOf(false)
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
      * The mesh as a force-graph: one node per known node, one link per (deduped) neighbor
@@ -489,6 +526,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val meshCoreTotal: StateFlow<Int> = _service.flatMapLatest {
         it?.meshCoreTotal ?: flowOf(0)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    /**
+     * True once any MeshCore packet has actually been bridged into our mesh (channel msg, DM, advert,
+     * trace, …) — i.e. real MeshCore traffic is reaching us, independent of whether it produced a
+     * discovered contact. Drives Explore's "Unknown network" card when that traffic can't be
+     * attributed to a detected/pinned network.
+     */
+    val meshCoreTrafficSeen: StateFlow<Boolean> = meshCoreTotal
+        .map { it > 0 }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Wall-clock time of the most recent MeshCore packet bridged into our mesh, or null if none yet. */
+    val lastMeshCorePacketAtMs: StateFlow<Long?> = meshCorePackets
+        .map { it.firstOrNull()?.timestampMs }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Wall-clock time of the most recent received packet, or null if none yet. */
     val lastPacketAtMs: StateFlow<Long?> = rxPackets
@@ -665,21 +717,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
-     * Nodes heard advertising that we haven't added — shown on the Explore tab. Persisted across
-     * restarts; entries expire [DISCOVERED_TTL_MS] after they were last heard. Excludes self and
-     * any node already in our contacts (matched by node id or public key).
+     * Nodes heard advertising recently — shown on the Explore tab. Persisted across restarts; entries
+     * expire [DISCOVERED_TTL_MS] after they were last heard. Excludes only self. Nodes already in our
+     * contacts are kept (so a contact you've added or chatted with still shows while it's advertising)
+     * and flagged via [savedContactKeys] so the UI can mark them as already saved.
      */
     val discoveredContacts: StateFlow<List<DiscoveredContact>> =
-        combine(dao.discoveredContacts(), contacts, nodeId) { discovered, contacts, me ->
+        combine(dao.discoveredContacts(), nodeId) { discovered, me ->
             val meHex = me.toHex()
-            val addedNodes = contacts.mapTo(HashSet()) { it.nodeHex }
-            val addedKeys = contacts.mapTo(HashSet()) { it.pubKeyHex }
             val cutoff = System.currentTimeMillis() - DISCOVERED_TTL_MS
-            discovered.filter {
-                it.lastAdvertisedMs >= cutoff &&
-                    it.nodeHex != meHex && it.nodeHex !in addedNodes && it.pubKeyHex !in addedKeys
-            }
+            discovered.filter { it.lastAdvertisedMs >= cutoff && it.nodeHex != meHex }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Node ids and public keys of saved contacts, for marking already-saved nodes in Explore as
+     * "you already have this one". A node is saved if either its node id or public key is present.
+     */
+    val savedContactKeys: StateFlow<Set<String>> =
+        contacts.map { list ->
+            buildSet { list.forEach { add(it.nodeHex); if (it.pubKeyHex.isNotBlank()) add(it.pubKeyHex) } }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     fun messagesFor(peerHex: String): StateFlow<List<Message>> =
         dao.messagesFor(peerHex).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -1160,8 +1217,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         sigVerified = a.sigVerified,
                         lastAdvertisedMs = heardMs,
                         nodeAdvertisedMs = nodeAdvertisedMs,
-                        // Tier MeshCore contacts to the bridge network they came through (auto-detected).
-                        networkCode = tierNetworkCode(),
+                        // Tier to the network the bridging carrier announced (carried per-advert by the
+                        // service); fall back to the detected-network heuristic only when unknown.
+                        networkCode = a.networkCode.ifBlank { tierNetworkCode() },
                     )
                 }
             }
@@ -1383,6 +1441,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 meshCoreRoute = msg.meshCoreRoute.orEmpty(),
                 meshCoreHops = msg.meshCoreHops,
                 meshCorePacketId = msg.meshCorePacketId.orEmpty(),
+                networkCode = msg.meshCoreNetworkCode,
                 packetHex = msg.raw?.toHex().orEmpty(),
                 meshCorePacketHex = msg.meshCorePacketRaw?.toHex().orEmpty(),
                 rssi = msg.rssi,
@@ -1426,6 +1485,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     meshCoreRoute = msg.meshCoreRoute.orEmpty(),
                     meshCoreHops = msg.meshCoreHops,
                     meshCorePacketId = msg.meshCorePacketId.orEmpty(),
+                    networkCode = msg.meshCoreNetworkCode,
                     // Native Sidepath channel messages carry their raw datagram for "Packet details";
                     // bridged MeshCore ones carry the inner MeshCore packet (examined separately).
                     packetHex = msg.raw?.toHex().orEmpty(),
@@ -1541,6 +1601,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     else -> shortHex(peerHex)
                 }
                 val isMeshCore = contact?.isMeshCore ?: (disc?.source == DiscoverySource.MESHCORE)
+                val topoEntry = t.firstOrNull { it.nodeId.toHex() == peerHex }
                 ProfileInfo(
                     peerHex = peerHex,
                     isChannel = false,
@@ -1551,8 +1612,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     online = inTopo,
                     description = nodeDescription(peerHex, byNode, t),
                     platform = nodePlatform(peerHex, t),
-                    neighborHexes = t.firstOrNull { it.nodeId.toHex() == peerHex }
-                        ?.neighborIds?.map { it.toHex() } ?: emptyList(),
+                    neighborHexes = topoEntry?.neighborIds?.map { it.toHex() } ?: emptyList(),
+                    bridges = topoEntry?.bridges ?: emptyList(),
                     isMeshCore = isMeshCore,
                     isDiscovered = !isContact && disc != null,
                     nodeType = disc?.nodeType ?: 0,
@@ -1672,6 +1733,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         timestampMs = System.currentTimeMillis(),
                         status = if (id == null) MsgStatus.FAILED else MsgStatus.SENT,
                         viaMeshCore = true,
+                        networkCode = activeNetwork.value?.code.orEmpty(),
                         packetHex = id?.let { service.originatedPacketHex(it.toHex()) }.orEmpty(),
                     )
                 )
@@ -1716,6 +1778,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     text = body,
                     timestampMs = System.currentTimeMillis(),
                     status = MsgStatus.SENT, // broadcast — no per-message ACK
+                    networkCode = activeNetwork.value?.code.orEmpty(),
                     packetHex = service.originatedPacketHex(id.toHex()).orEmpty(),
                 )
             )
@@ -1921,8 +1984,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val clean = hex.trim().lowercase()
         if (clean.length != Sidepath.SEED_BYTES * 2 || !clean.all { it in "0123456789abcdef" }) return false
         viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[SEED_KEY] = clean }
+            getApplication<Application>().dataStore.edit {
+                it[SEED_KEY] = clean
+                // Switching mesh invalidates the previously detected/pinned MeshCore network: it belonged
+                // to the old mesh. Drop back to auto-detect so the active network reads none until the new
+                // mesh surfaces one (a manual pin would otherwise carry the stale network across).
+                it[NETWORK_AUTO_KEY] = true
+            }
             _seedHex.value = clean
+            _networkAuto.value = true
             processed.clear()
             restartService()
         }

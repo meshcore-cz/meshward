@@ -3,6 +3,7 @@ package cz.meshcore.meshward.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -24,6 +25,8 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.NearMe
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Settings
@@ -92,6 +95,7 @@ fun ProfileScreen(
     // Persisted in the DB (keyed by node + source) so they survive a restart, after the live Rx Log
     // buffers have aged out. Sidepath = last signed ANNOUNCE; MeshCore = last ADVERT.
     val peers by vm.connectedPeers.collectAsState()
+    val networks by vm.networks.collectAsState()
     val userLoc by vm.userLocation.collectAsState()
     // Distance to this node, when both we and it have coordinates.
     val distance = userLoc?.takeIf { profile.hasGps }?.let { formatDistance(distanceMeters(it, profile.lat, profile.lon)) }
@@ -269,29 +273,63 @@ fun ProfileScreen(
 
             Spacer(Modifier.size(28.dp))
 
-            // Information block.
+            // Information block, grouped into logical sections: common details, then Sidepath-specific
+            // facts, then MeshCore-specific ones. Each section is shown only when it has content.
             if (profile.isChannel) {
                 ChannelInfo(profile)
             } else {
-                UserInfo(profile, distance)
-                // Neighbors this node directly connects to, learned from its signed ANNOUNCE.
-                if (profile.neighborHexes.isNotEmpty()) {
-                    Spacer(Modifier.size(20.dp))
-                    NeighborsSection(vm, profile.neighborHexes, onOpenProfile)
+                CommonDetails(profile, distance)
+
+                // Sidepath section: presence, neighbors, supplied bridges, last signed ANNOUNCE. Shown
+                // for native Sidepath nodes, or any node that has Sidepath data to show.
+                val hasSidepath = !profile.isMeshCore || profile.online ||
+                    profile.neighborHexes.isNotEmpty() || profile.bridges.isNotEmpty() || sidepathAnn != null
+                if (hasSidepath) {
+                    Spacer(Modifier.size(24.dp))
+                    ProfileSection("Sidepath") {
+                        InfoRow("Status", if (profile.online) "Online (announcing)" else "Not currently visible")
+                        if (profile.neighborHexes.isNotEmpty()) {
+                            NeighborsSection(vm, profile.neighborHexes, onOpenProfile)
+                        }
+                        if (profile.bridges.isNotEmpty()) {
+                            BridgesSection(profile.bridges, networks, onOpenNetworkDetail)
+                        }
+                        if (sidepathAnn != null) {
+                            AnnouncementRow("Last announcement", formatRelativeAge(sidepathAnn.timestampMs, nowMs)) {
+                                showAnnounce = vm.decodePacket(sidepathAnn.rawHex, timestampMs = sidepathAnn.timestampMs)
+                            }
+                        }
+                    }
                 }
-                if (sidepathAnn != null || meshAnn != null) {
-                    Spacer(Modifier.size(20.dp))
-                    AnnouncementsSection(
-                        sidepathAnnounceMs = sidepathAnn?.timestampMs,
-                        meshAdvertMs = meshAnn?.timestampMs,
-                        nowMs = nowMs,
-                        onShowSidepath = {
-                            sidepathAnn?.let { showAnnounce = vm.decodePacket(it.rawHex, timestampMs = it.timestampMs) }
-                        },
-                        onShowMesh = {
-                            meshAnn?.let { showAdvert = vm.decodeMeshCorePacketRaw(it.rawHex, it.timestampMs) }
-                        },
-                    )
+
+                // MeshCore section: bridged-network facts and the last ADVERT we heard.
+                if (profile.isMeshCore) {
+                    Spacer(Modifier.size(24.dp))
+                    ProfileSection("MeshCore") {
+                        if (profile.networkCode.isNotBlank()) {
+                            Row(
+                                Modifier.fillMaxWidth().clickable { onOpenNetworkDetail(profile.networkCode) },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) { InfoRow("Network", profile.networkCode) }
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "Open network",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                        InfoRow("Reachability", "Bridged — not directly DM-reachable")
+                        if (profile.nodeType != 0) InfoRow("Node type", nodeTypeLabel(profile.nodeType))
+                        InfoRow("Signature", if (profile.sigVerified) "Verified" else "Unverified")
+                        if (profile.nodeAdvertisedMs > 0) InfoRow("Advertised", formatRelative(profile.nodeAdvertisedMs))
+                        if (meshAnn != null) {
+                            AnnouncementRow("Last advert", formatRelativeAge(meshAnn.timestampMs, nowMs)) {
+                                showAdvert = vm.decodeMeshCorePacketRaw(meshAnn.rawHex, meshAnn.timestampMs)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -401,40 +439,16 @@ fun ProfileScreen(
     }
 }
 
-/** Last-heard announcement rows (Sidepath ANNOUNCE / MeshCore ADVERT), each opening its packet. */
+/** One announcement row: a [title] + relative time on the left, "View packet" on the right. */
 @Composable
-private fun AnnouncementsSection(
-    sidepathAnnounceMs: Long?,
-    meshAdvertMs: Long?,
-    nowMs: Long,
-    onShowSidepath: () -> Unit,
-    onShowMesh: () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            "Last announcement",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (sidepathAnnounceMs != null) {
-            AnnouncementRow("Sidepath", formatRelativeAge(sidepathAnnounceMs, nowMs), onShowSidepath)
-        }
-        if (meshAdvertMs != null) {
-            AnnouncementRow("MeshCore", formatRelativeAge(meshAdvertMs, nowMs), onShowMesh)
-        }
-    }
-}
-
-/** One announcement source: network label + relative time on the left, "View packet" on the right. */
-@Composable
-private fun AnnouncementRow(network: String, relative: String, onClick: () -> Unit) {
+private fun AnnouncementRow(title: String, relative: String, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Column {
-            Text(network, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+            Text(title, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
             Text(
                 relative,
                 style = MaterialTheme.typography.bodySmall,
@@ -480,11 +494,14 @@ private fun NeighborsSection(
         )
         neighborHexes.forEach { hex ->
             val label = vm.nameForHex(hex).ifBlank { "node ${hex.take(8)}" }
+            // Use the same identicon as everywhere else when we can resolve the node's full public key
+            // (NodeId is only pubkey[:10], which can't seed an identicon); else fall back to initials.
+            val pub = vm.pubKeyForHex(hex)
             Row(
                 Modifier.fillMaxWidth().clickable { onOpenProfile(hex) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(seed = hex, label = label, size = 32)
+                Avatar(seed = hex, label = label, size = 32, identiconKey = pub.ifBlank { null })
                 Spacer(Modifier.size(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
@@ -500,22 +517,103 @@ private fun NeighborsSection(
     }
 }
 
+/** A titled block of profile details, with a section header above its rows. */
 @Composable
-private fun UserInfo(p: ProfileInfo, distance: String? = null) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+private fun ProfileSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        content()
+    }
+}
+
+/** Details that apply to any node, regardless of transport: identity, device, and location. */
+@Composable
+private fun CommonDetails(p: ProfileInfo, distance: String?) {
+    ProfileSection("Details") {
         InfoRow("Node ID", p.nodeHex)
-        if (p.pubKeyHex.isNotBlank()) InfoRow("Public key", p.pubKeyHex)
         if (p.platform.isNotBlank()) InfoRow("Platform", p.platform)
-        InfoRow("Status", if (p.online) "Online (announcing)" else "Not currently visible")
         InfoRow("In contacts", if (p.isContact) "Yes" else "No")
-        // Extra section for bridged MeshCore nodes (from the last ADVERT we heard).
-        if (p.isMeshCore) {
-            InfoRow("Network", "MeshCore (bridged — not directly reachable)")
-            if (p.nodeType != 0) InfoRow("Node type", nodeTypeLabel(p.nodeType))
-            InfoRow("Signature", if (p.sigVerified) "verified" else "unverified")
-            if (p.hasGps) InfoRow("Location", "%.6f, %.6f".format(p.lat, p.lon))
-            if (distance != null) InfoRow("Distance", "$distance (approx.)")
-            if (p.nodeAdvertisedMs > 0) InfoRow("Advertised", formatRelative(p.nodeAdvertisedMs))
+        if (p.hasGps) LocationRow(p.lat, p.lon, distance)
+    }
+}
+
+/** Coordinates with a pin icon, and an approximate-distance chip when our own location is known. */
+@Composable
+private fun LocationRow(lat: Double, lon: Double, distance: String?) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(
+            Icons.Default.Place,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column(Modifier.weight(1f)) {
+            Text("Location", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("%.5f, %.5f".format(lat, lon), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+        }
+        if (distance != null) {
+            androidx.compose.material3.Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(Icons.Default.NearMe, contentDescription = null, modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                    Text(
+                        "≈ $distance",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Lists the external networks a gateway node bridges (from its signed ANNOUNCE); tap to open one. */
+@Composable
+private fun BridgesSection(
+    bridges: List<cz.meshcore.sidepath.protocol.BridgeAd>,
+    networks: List<cz.meshcore.meshward.data.MeshNetwork>,
+    onOpenNetworkDetail: (String) -> Unit,
+) {
+    val byCode = remember(networks) { networks.associateBy { it.code } }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            "Bridges (${bridges.size})",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        bridges.forEach { ad ->
+            val net = cz.meshcore.meshward.resolveBridge(ad, byCode)
+            Row(
+                Modifier.fillMaxWidth().clickable { onOpenNetworkDetail(ad.code) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NetworkCodeChip(ad.code)
+                Spacer(Modifier.size(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(net.name.ifBlank { ad.code }, style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                    val summary = networkRadioSummary(net)
+                    if (summary.isNotBlank()) {
+                        Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

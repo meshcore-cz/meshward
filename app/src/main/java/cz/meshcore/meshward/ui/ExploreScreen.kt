@@ -1,7 +1,11 @@
 package cz.meshcore.meshward.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -15,9 +19,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -25,6 +31,8 @@ import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,6 +68,7 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.LocationPrecision
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +85,15 @@ fun ExploreScreen(
     val topology by vm.topology.collectAsState()
     val detectedNetworks by vm.detectedNetworks.collectAsState()
     val networkAuto by vm.networkAuto.collectAsState()
+    val meshCoreTrafficSeen by vm.meshCoreTrafficSeen.collectAsState()
+    val savedContactKeys by vm.savedContactKeys.collectAsState()
+    val meshCoreTotal by vm.meshCoreTotal.collectAsState()
+    val lastMeshCorePacketAtMs by vm.lastMeshCorePacketAtMs.collectAsState()
+    val isRunning by vm.isRunning.collectAsState()
+    // Ticks once a second so the active-network card's "last packet" age stays current.
+    val nowMs by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) { value = System.currentTimeMillis(); delay(1000) }
+    }
     val chatItems by vm.chatItems.collectAsState()
     val myNode by vm.nodeId.collectAsState()
     val userLoc by vm.userLocation.collectAsState()
@@ -112,6 +131,7 @@ fun ExploreScreen(
     val roleFilter by vm.exploreRoleFilter.collectAsState()
     val networkFilter by vm.exploreNetworkFilter.collectAsState()
     val sortByDistance by vm.exploreSortByDistance.collectAsState()
+    val hideSaved by vm.exploreHideSaved.collectAsState()
 
     // Ask for coarse location when the user opts in (routes to app settings if permanently denied).
     val requestLocation = rememberLocationEnabler(vm)
@@ -120,11 +140,12 @@ fun ExploreScreen(
 
     val showLocationBanner = !promptDismissed && !locationEnabled
     val canSortByDistance = locationEnabled && userLoc != null
-    val shown = remember(discovered, typeFilter, roleFilter, networkFilter, sortByDistance, userLoc) {
+    val shown = remember(discovered, typeFilter, roleFilter, networkFilter, sortByDistance, userLoc, hideSaved, savedContactKeys) {
         var list = discovered
         typeFilter?.let { t -> list = list.filter { it.source == t } }
         roleFilter?.let { r -> list = list.filter { it.nodeType == r } }
         networkFilter?.let { n -> list = list.filter { it.networkCode == n } }
+        if (hideSaved) list = list.filter { it.nodeHex !in savedContactKeys && it.pubKeyHex !in savedContactKeys }
         val loc = userLoc
         if (sortByDistance && loc != null) {
             list = list.sortedBy { if (it.hasGps) distanceMeters(loc, it.lat, it.lon) else Float.MAX_VALUE }
@@ -193,11 +214,17 @@ fun ExploreScreen(
                             summary = networkRadioSummary(activeNet),
                             autoDetected = networkAuto,
                             bridgeCount = bridgeCount,
+                            packetCount = meshCoreTotal,
+                            lastPacketAtMs = lastMeshCorePacketAtMs,
+                            nowMs = nowMs,
                             onClick = { onOpenNetworkDetail(activeNet.code) },
                         )
                     }
-                } else if (discovered.any { it.source == DiscoverySource.MESHCORE }) {
-                    // MeshCore traffic with no network detected/pinned — surface it as "Unknown network".
+                } else if (isRunning && meshCoreTrafficSeen) {
+                    // Real MeshCore packets have arrived this session but none could be attributed to a
+                    // network (no bridge advertised one, no carrier tag) — surface it as "Unknown
+                    // network". Keyed on live traffic only (not persisted discovered contacts, which
+                    // would wrongly show it at startup), and only while the mesh is on.
                     item {
                         UnknownNetworkCard(onClick = { onOpenNetworkDetail(cz.meshcore.meshward.UNKNOWN_NETWORK_CODE) })
                     }
@@ -225,6 +252,8 @@ fun ExploreScreen(
                             canSortByDistance = canSortByDistance,
                             sortByDistance = sortByDistance,
                             onToggleSort = { vm.setExploreSortByDistance(!sortByDistance) },
+                            hideSaved = hideSaved,
+                            onToggleHideSaved = { vm.setExploreHideSaved(!hideSaved) },
                         )
                     }
                     item {
@@ -250,9 +279,16 @@ fun ExploreScreen(
                         ) {
                             Icon(Icons.Default.TravelExplore, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.size(12.dp))
-                            Text("No discovered contacts", style = MaterialTheme.typography.titleMedium)
+                            val onNetwork = activeNetwork != null
                             Text(
-                                "Nodes you hear advertising — over Sidepath or bridged from MeshCore — appear here.",
+                                if (onNetwork) "Waiting for adverts…" else "No discovered contacts",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                if (onNetwork)
+                                    "Listening on ${activeNetwork!!.name} — nodes advertising on this network will appear here as they're heard."
+                                else
+                                    "Nodes you hear advertising — over Sidepath or bridged from MeshCore — appear here.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodyMedium,
                             )
@@ -267,7 +303,8 @@ fun ExploreScreen(
                 } else {
                     items(shown, key = { it.pubKeyHex }) { d ->
                         val distance = userLoc?.takeIf { d.hasGps }?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
-                        DiscoveredRow(d, distance = distance) { onOpenProfile(d.nodeHex) }
+                        val isSaved = d.nodeHex in savedContactKeys || d.pubKeyHex in savedContactKeys
+                        DiscoveredRow(d, distance = distance, isSaved = isSaved) { onOpenProfile(d.nodeHex) }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                     }
                 }
@@ -321,6 +358,24 @@ private fun AnalyzerSyncButton(syncing: Boolean, onClick: () -> Unit) {
 }
 
 /**
+ * A green "live" dot that flashes bright on each received packet then fades back to dim. [pulseKey]
+ * is whatever changes per packet (the running packet count): every change re-triggers the flash.
+ */
+@Composable
+private fun LiveDot(pulseKey: Any?, modifier: Modifier = Modifier) {
+    val alpha = remember { Animatable(0.3f) }
+    LaunchedEffect(pulseKey) {
+        alpha.snapTo(1f)
+        alpha.animateTo(0.3f, animationSpec = tween(durationMillis = 1000))
+    }
+    Box(
+        modifier
+            .size(8.dp)
+            .background(Color(0xFF4CAF50).copy(alpha = alpha.value), CircleShape),
+    )
+}
+
+/**
  * Compact header card on Explore showing the active Meshcore Network; taps through to its detail.
  * Clarifies that this is the Meshcore network and whether it was auto-detected from a nearby bridge
  * or pinned manually.
@@ -332,6 +387,9 @@ private fun ActiveNetworkCard(
     summary: String,
     autoDetected: Boolean,
     bridgeCount: Int,
+    packetCount: Int,
+    lastPacketAtMs: Long?,
+    nowMs: Long,
     onClick: () -> Unit,
 ) {
     // Accent-tinted (primaryContainer) to match the active network detail page's header box.
@@ -348,7 +406,20 @@ private fun ActiveNetworkCard(
         ) {
             NetworkCodeChip(code)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(name.ifBlank { code }, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(name.ifBlank { code }, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                    LiveDot(pulseKey = packetCount)
+                    // Last-packet age right after the live dot, so the second line is free to show the
+                    // full bridge count without being squeezed by a right-hand time column.
+                    if (lastPacketAtMs != null) {
+                        Text(
+                            formatRelativeAge(lastPacketAtMs, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = subtle,
+                            maxLines = 1,
+                        )
+                    }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Icon(Icons.Default.Hub, contentDescription = null, tint = subtle, modifier = Modifier.size(13.dp))
                     val detection = if (autoDetected) "auto-detected" else "manual"
@@ -416,7 +487,7 @@ private fun UnknownNetworkCard(onClick: () -> Unit) {
 }
 
 @Composable
-internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, onClick: () -> Unit) {
+internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, isSaved: Boolean = false, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -425,7 +496,8 @@ internal fun DiscoveredRow(d: DiscoveredContact, distance: String? = null, onCli
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(d.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(d.name, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                if (isSaved) SavedChip()
                 DiscoveredBadge(d)
             }
             val sub = buildString {
@@ -521,6 +593,8 @@ private fun FilterBar(
     canSortByDistance: Boolean,
     sortByDistance: Boolean,
     onToggleSort: () -> Unit,
+    hideSaved: Boolean,
+    onToggleHideSaved: () -> Unit,
 ) {
     FlowRow(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -561,11 +635,51 @@ private fun FilterBar(
                 label = { Text("Nearest") },
             )
         }
+        // Compact icon-only toggle to hide contacts we already have saved.
+        FilterChip(
+            selected = hideSaved,
+            onClick = { onToggleHideSaved() },
+            label = {
+                Icon(
+                    if (hideSaved) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                    contentDescription = "Hide saved contacts",
+                    modifier = Modifier.size(16.dp),
+                )
+            },
+        )
     }
 }
 
 /** MeshCore brand teal, used for the source/network badges so a MeshCore origin always reads the same. */
 private val MeshCoreColor = Color(0xFF00838F)
+
+/** Marks a discovered row as a contact we already have saved (added or chatted with). */
+@Composable
+private fun SavedChip() {
+    Surface(
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(12.dp),
+            )
+            Text(
+                "Saved",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
 
 /**
  * The origin badge on a discovered row: a MeshCore contact shows its tiered network code (small teal

@@ -225,6 +225,10 @@ data class Message(
     val meshCoreRoute: String = "",
     val meshCoreHops: Int = 0,
     val meshCorePacketId: String = "",
+    // The external network this message crossed the MeshCore bridge on: for incoming, the carrier's
+    // embedded SPMC code (§13.1) or the bridge's resolved network; for outgoing, the network we sent
+    // it on. Blank for native Sidepath messages and rows from before this was recorded.
+    val networkCode: String = "",
     // Set when a gateway relayed this (outgoing channel) message onto MeshCore and sent back an
     // ACK_BRIDGED. [bridgedByHex] is the gateway NodeID hex.
     val bridgedToMeshCore: Boolean = false,

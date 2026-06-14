@@ -151,6 +151,7 @@ private fun MeshCoreRow(p: MeshCorePacket, nowMs: Long, onClick: () -> Unit) {
                     MeshCorePill(p.envelope?.type)
                     MetaText(mcTimeFmt.format(Date(p.timestampMs)))
                     MetaText(meshCoreMeta(p.envelope), Modifier.weight(1f))
+                    if (p.networkCode.isNotBlank()) MeshCoreNetworkBadge(p.networkCode)
                     if (p.receiveCount > 1) MeshCoreCountBadge(p.receiveCount)
                     SignalLabel(p.directRssi, "rssi", style = MaterialTheme.typography.labelSmall)
                 }
@@ -159,6 +160,7 @@ private fun MeshCoreRow(p: MeshCorePacket, nowMs: Long, onClick: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MeshCorePill(p.envelope?.type)
                     MetaText(mcTimeFmt.format(Date(p.timestampMs)), Modifier.weight(1f))
+                    if (p.networkCode.isNotBlank()) MeshCoreNetworkBadge(p.networkCode)
                     if (p.receiveCount > 1) MeshCoreCountBadge(p.receiveCount)
                     SignalLabel(p.directRssi, "rssi", style = MaterialTheme.typography.labelSmall)
                 }
@@ -199,6 +201,21 @@ private fun MeshCoreCountBadge(count: Int) {
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/** Badge marking a packet that carried an embedded network code (SPMC carrier tag, §13.1). */
+@Composable
+private fun MeshCoreNetworkBadge(code: String) {
+    Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(6.dp)) {
+        Text(
+            code,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onTertiaryContainer,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
     }
@@ -323,6 +340,7 @@ internal fun MeshCoreDetailDialog(p: MeshCorePacket, vm: ChatViewModel, onDismis
 
                 Spacer(Modifier.width(4.dp))
                 Text("Sidepath carrier", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                if (p.networkCode.isNotBlank()) McField("Bridged network", "${p.networkCode} (carrier tag)")
                 McField("Received", p.receiveCount.toString())
                 McField("Source", "${vm.nameForHex(p.source.toHex())}\n${p.source.toHex()}")
                 McField("Datagram", p.datagramId.toHexLower())
