@@ -10,8 +10,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // v3: NodeIDs widened 8→10 bytes (protocol v3), so old peer/contact ids are stale —
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
-    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, NodeAnnouncement::class],
-    version = 17,
+    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, NodeAnnouncement::class, MeshNetwork::class],
+    version = 19,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -143,12 +143,36 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v17→v18: add the mesh_networks table (user-added Meshcore Networks; built-in defaults are
+        // loaded from assets/networks.json, not stored here). Additive — migrate in place.
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mesh_networks` (" +
+                        "`code` TEXT NOT NULL, `name` TEXT NOT NULL, " +
+                        "`freqMhz` REAL NOT NULL, `bandwidthKhz` REAL NOT NULL, " +
+                        "`spreadingFactor` INTEGER NOT NULL, `codingRate` INTEGER NOT NULL, " +
+                        "`analyzerUrls` TEXT NOT NULL, `mqttEndpoints` TEXT NOT NULL, " +
+                        "`geoJson` TEXT NOT NULL, `description` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`code`))"
+                )
+            }
+        }
+
+        // v18→v19: tier discovered MeshCore contacts to the bridge network they came through.
+        // Additive `networkCode` column (blank for Sidepath-native and pre-existing rows).
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `discovered_contacts` ADD COLUMN `networkCode` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun get(context: Context): ChatDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 "meshward.db",
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
                 .fallbackToDestructiveMigration()
                 .build().also { instance = it }
         }

@@ -27,6 +27,7 @@ import cz.meshcore.meshward.data.ChatDatabase
 import cz.meshcore.meshward.data.Contact
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
+import cz.meshcore.meshward.data.MeshNetwork
 import cz.meshcore.meshward.data.Message
 import cz.meshcore.meshward.data.MsgStatus
 import cz.meshcore.meshward.data.Reaction
@@ -87,9 +88,22 @@ private val LOCATION_PROMPT_DISMISSED_KEY = booleanPreferencesKey("location_prom
 private val LOCATION_LAT_KEY = doublePreferencesKey("location_lat")
 private val LOCATION_LON_KEY = doublePreferencesKey("location_lon")
 private val LOCATION_PRECISION_KEY = stringPreferencesKey("location_precision")
+// The manually pinned Meshcore Network code (its short code, e.g. "CZ"), used only when auto is off.
+private val ACTIVE_NETWORK_CODE_KEY = stringPreferencesKey("active_network_code")
+// Whether the active network is auto-detected from heard bridges (default) vs. manually pinned.
+private val NETWORK_AUTO_KEY = booleanPreferencesKey("network_auto")
 
 /** Default MeshCore packet analyzer base URL; the content hash is appended. */
 const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
+
+/** The Meshcore Network pinned by default (used only as the manual fallback before auto-detection). */
+const val DEFAULT_NETWORK_CODE = "CZ"
+
+/**
+ * Default URL the "Refresh definitions" action pulls the network-definitions dataset from. Placeholder
+ * until the canonical sidepath-protocol-hosted URL is provided; the refresh plumbing is otherwise live.
+ */
+const val DEFAULT_NETWORK_DEFS_URL = "https://raw.githubusercontent.com/meshcore-cz/sidepath-protocol/main/networks.json"
 
 /** How long a discovered contact survives after it was last heard advertising. */
 private const val DISCOVERED_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
@@ -293,6 +307,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _analyzerUrls = MutableStateFlow(listOf(DEFAULT_ANALYZER_URL))
     val analyzerUrls: StateFlow<List<String>> = _analyzerUrls.asStateFlow()
 
+    // ---- Meshcore Networks (auto-detected from bridge announces) --------------
+    // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
+    // cached on disk; user-added ones live in the DB as custom overrides. The effective list is the
+    // union, deduped by code. The active network is auto-detected from nearby gateway bridges by
+    // default ([networkAuto]); turning auto off lets the user pin one manually ([activeNetworkCode]).
+    private val _builtinNetworks = MutableStateFlow(loadNetworkDefs(app))
+
+    val networks: StateFlow<List<MeshNetwork>> =
+        combine(dao.networks(), _builtinNetworks) { custom, builtin ->
+            val byCode = LinkedHashMap<String, MeshNetwork>()
+            builtin.forEach { byCode[it.code] = it }
+            custom.forEach { byCode[it.code] = it } // a custom network overrides a built-in of the same code
+            byCode.values.sortedBy { it.code }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, _builtinNetworks.value.sortedBy { it.code })
+
+    private val _activeNetworkCode = MutableStateFlow(DEFAULT_NETWORK_CODE)
+    val activeNetworkCode: StateFlow<String> = _activeNetworkCode.asStateFlow()
+
+    private val _networkAuto = MutableStateFlow(true)
+    /** When true, the active network is auto-detected from heard bridges; when false it's pinned manually. */
+    val networkAuto: StateFlow<Boolean> = _networkAuto.asStateFlow()
+
     private val _avatarStyle = MutableStateFlow(AvatarStyle.IDENTICON)
     val avatarStyle: StateFlow<AvatarStyle> = _avatarStyle.asStateFlow()
 
@@ -340,6 +376,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val topology: StateFlow<List<TopologyEntry>> = _service.flatMapLatest {
         it?.knownTopology ?: flowOf(emptyList())
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Networks currently detected from verified gateway announces: every distinct bridge `code` heard
+     * in the live topology, resolved against the definitions dataset (custom announce radio params
+     * override the canonical ones), most-recently-announced first. Empty when no bridge is nearby.
+     */
+    val detectedNetworks: StateFlow<List<MeshNetwork>> =
+        combine(topology, networks) { topo, defs ->
+            val byCode = defs.associateBy { it.code }
+            topo.filter { it.bridges.isNotEmpty() }
+                .sortedByDescending { it.lastAnnounceMs }
+                .flatMap { entry -> entry.bridges.map { resolveBridge(it, byCode) } }
+                .distinctBy { it.code }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * The network this device is operating in: auto-detected (the strongest/most-recent detected
+     * network) when [networkAuto] is on, else the manually pinned [activeNetworkCode]. Null when auto
+     * is on and nothing is detected — callers (Explore) hide the network card in that case.
+     */
+    val activeNetwork: StateFlow<MeshNetwork?> =
+        combine(networks, detectedNetworks, _activeNetworkCode, _networkAuto) { all, detected, code, auto ->
+            if (auto) detected.firstOrNull()
+            else all.firstOrNull { it.code == code }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val connectedPeers: StateFlow<List<PeerInfo>> = _service.flatMapLatest {
         it?.connectedPeers ?: flowOf(emptyList())
@@ -679,6 +740,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _locationEnabled.value = pref[LOCATION_ENABLED_KEY] ?: false
             _locationPromptDismissed.value = pref[LOCATION_PROMPT_DISMISSED_KEY] ?: false
             _locationPrecision.value = LocationPrecision.fromValue(pref[LOCATION_PRECISION_KEY])
+            _activeNetworkCode.value = pref[ACTIVE_NETWORK_CODE_KEY] ?: DEFAULT_NETWORK_CODE
+            _networkAuto.value = pref[NETWORK_AUTO_KEY] ?: true
             val lat = pref[LOCATION_LAT_KEY]
             val lon = pref[LOCATION_LON_KEY]
             if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)
@@ -704,6 +767,57 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _themeMode.value = mode
         }
     }
+
+    // ---- Meshcore Networks ----------------------------------------------------
+
+    /**
+     * Pins the device to the network with [code] and turns auto-detection off (a manual pick is an
+     * explicit override). Persisted across restarts.
+     */
+    fun setActiveNetwork(code: String) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit {
+                it[ACTIVE_NETWORK_CODE_KEY] = code
+                it[NETWORK_AUTO_KEY] = false
+            }
+            _activeNetworkCode.value = code
+            _networkAuto.value = false
+        }
+    }
+
+    /** Toggles auto-detection of the active network from heard bridges (persisted across restarts). */
+    fun setNetworkAuto(auto: Boolean) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[NETWORK_AUTO_KEY] = auto }
+            _networkAuto.value = auto
+        }
+    }
+
+    /**
+     * Refreshes the bundled network definitions from [url] (download + validate + cache). On success
+     * the new built-ins take effect immediately and survive restart; on failure the existing
+     * definitions are kept. Returns the outcome so the UI can surface success/failure.
+     */
+    suspend fun refreshNetworkDefs(url: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            refreshNetworkDefs(getApplication(), url).map { fresh -> _builtinNetworks.value = fresh }
+        }
+
+    /** Adds or updates a user network. The stored row is always a custom (non-built-in) network. */
+    fun upsertNetwork(network: MeshNetwork) {
+        viewModelScope.launch { dao.upsertNetwork(network.copy(isBuiltin = false)) }
+    }
+
+    /**
+     * Deletes a custom network. A built-in of the same code (if any) re-surfaces; if the deleted
+     * network was active, selection falls through to the first remaining network.
+     */
+    fun deleteNetwork(code: String) {
+        viewModelScope.launch { dao.deleteNetwork(code) }
+    }
+
+    /** True if [code] is shipped as a built-in preset (so it can't be deleted, only customized). */
+    fun isBuiltinNetwork(code: String): Boolean = _builtinNetworks.value.any { it.code == code }
 
     // ---- approximate / precise location --------------------------------------
 
@@ -944,6 +1058,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         sigVerified = a.sigVerified,
                         lastAdvertisedMs = heardMs,
                         nodeAdvertisedMs = nodeAdvertisedMs,
+                        // Tier MeshCore contacts to the bridge network they came through (auto-detected).
+                        networkCode = tierNetworkCode(),
                     )
                 }
             }
@@ -1938,6 +2054,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sigVerified: Boolean = false,
         lastAdvertisedMs: Long,
         nodeAdvertisedMs: Long = 0L,
+        networkCode: String = "",
     ) {
         val firstSeen = dao.discoveredByPubKey(pubKeyHex)?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
         dao.upsertDiscovered(
@@ -1954,9 +2071,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 lastAdvertisedMs = lastAdvertisedMs,
                 nodeAdvertisedMs = nodeAdvertisedMs,
                 firstSeenMs = firstSeen,
+                networkCode = networkCode,
             )
         )
     }
+
+    /**
+     * The network code to tier a MeshCore discovery to: the most-recently-announced detected network
+     * (the bridge it most plausibly came through). Blank when no bridge is currently detected, so the
+     * contact stays untiered rather than mis-attributed. Sidepath-native discoveries are never tiered.
+     */
+    private fun tierNetworkCode(): String = detectedNetworks.value.firstOrNull()?.code ?: ""
 
     private fun generateSeedHex(): String =
         ByteArray(Sidepath.SEED_BYTES).also { SecureRandom().nextBytes(it) }.toHex()

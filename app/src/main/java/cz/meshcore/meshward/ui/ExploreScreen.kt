@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.NearMe
@@ -63,8 +64,11 @@ fun ExploreScreen(
     onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenNetworkDetail: (String) -> Unit = {},
 ) {
     val discovered by vm.discoveredContacts.collectAsState()
+    val activeNetwork by vm.activeNetwork.collectAsState()
+    val detectedNetworks by vm.detectedNetworks.collectAsState()
     val chatItems by vm.chatItems.collectAsState()
     val myNode by vm.nodeId.collectAsState()
     val userLoc by vm.userLocation.collectAsState()
@@ -75,6 +79,7 @@ fun ExploreScreen(
     var confirmClear by remember { mutableStateOf(false) }
     var typeFilter by remember { mutableStateOf<String?>(null) } // DiscoverySource.* or null = all
     var roleFilter by remember { mutableStateOf<Int?>(null) }     // MeshCore node type, or null = all
+    var networkFilter by remember { mutableStateOf<String?>(null) } // network code, or null = all
     var sortByDistance by remember { mutableStateOf(false) }
 
     // Ask for coarse location when the user opts in (routes to app settings if permanently denied).
@@ -84,10 +89,11 @@ fun ExploreScreen(
 
     val showLocationBanner = !promptDismissed && !locationEnabled
     val canSortByDistance = locationEnabled && userLoc != null
-    val shown = remember(discovered, typeFilter, roleFilter, sortByDistance, userLoc) {
+    val shown = remember(discovered, typeFilter, roleFilter, networkFilter, sortByDistance, userLoc) {
         var list = discovered
         typeFilter?.let { t -> list = list.filter { it.source == t } }
         roleFilter?.let { r -> list = list.filter { it.nodeType == r } }
+        networkFilter?.let { n -> list = list.filter { it.networkCode == n } }
         val loc = userLoc
         if (sortByDistance && loc != null) {
             list = list.sortedBy { if (it.hasGps) distanceMeters(loc, it.lat, it.lon) else Float.MAX_VALUE }
@@ -146,6 +152,16 @@ fun ExploreScreen(
                     modifier = Modifier.padding(padding),
                 )
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+                activeNetwork?.let { net ->
+                    item {
+                        ActiveNetworkCard(
+                            code = net.code,
+                            name = net.name,
+                            summary = networkRadioSummary(net),
+                            onClick = { onOpenNetworkDetail(net.code) },
+                        )
+                    }
+                }
                 if (showLocationBanner) {
                     item {
                         LocationOptInBanner(
@@ -161,6 +177,9 @@ fun ExploreScreen(
                             onTypeFilter = { typeFilter = it },
                             roleFilter = roleFilter,
                             onRoleFilter = { roleFilter = it },
+                            networkCodes = detectedNetworks.map { it.code },
+                            networkFilter = networkFilter,
+                            onNetworkFilter = { networkFilter = it },
                             canSortByDistance = canSortByDistance,
                             sortByDistance = sortByDistance,
                             onToggleSort = { sortByDistance = !sortByDistance },
@@ -219,6 +238,39 @@ fun ExploreScreen(
                 TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+/** Compact header card on Explore showing the active Meshcore Network; taps through to its detail. */
+@Composable
+private fun ActiveNetworkCard(code: String, name: String, summary: String, onClick: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = onClick),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            NetworkCodeChip(code)
+            Column(Modifier.weight(1f)) {
+                Text(name.ifBlank { code }, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
 
@@ -322,6 +374,9 @@ private fun FilterBar(
     onTypeFilter: (String?) -> Unit,
     roleFilter: Int?,
     onRoleFilter: (Int?) -> Unit,
+    networkCodes: List<String>,
+    networkFilter: String?,
+    onNetworkFilter: (String?) -> Unit,
     canSortByDistance: Boolean,
     sortByDistance: Boolean,
     onToggleSort: () -> Unit,
@@ -330,6 +385,14 @@ private fun FilterBar(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // Network (one chip per detected bridge network; shown only when a bridge is around)
+        networkCodes.forEach { code ->
+            FilterChip(
+                selected = networkFilter == code,
+                onClick = { onNetworkFilter(if (networkFilter == code) null else code) },
+                label = { Text(code) },
+            )
+        }
         // Source
         FilterChip(
             selected = typeFilter == DiscoverySource.SIDEPATH,

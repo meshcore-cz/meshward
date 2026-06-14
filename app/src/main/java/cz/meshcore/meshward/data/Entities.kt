@@ -27,6 +27,39 @@ data class Channel(
     val kind: String,
 )
 
+/**
+ * A "Meshcore Network" — a named region/profile the device can operate in (e.g. "CZ"). Bundles the
+ * LoRa tech parameters (informational/display only for now — these do NOT reconfigure the radio),
+ * useful links, and an optional geographic territory as a GeoJSON geometry. Keyed by its short
+ * [code] (≤5 chars). Built-in defaults come from the sidepath-protocol definitions dataset (bundled
+ * + refreshable) and are loaded in-memory with [isBuiltin] = true; user-added/override networks are
+ * stored in this table (always [isBuiltin] = false).
+ * [analyzerUrls] and [mqttEndpoints] are newline-separated lists (parsed with parseAnalyzerUrls).
+ */
+@Entity(tableName = "mesh_networks")
+data class MeshNetwork(
+    @PrimaryKey val code: String,
+    val name: String,
+    val freqMhz: Double = 0.0,
+    val bandwidthKhz: Double = 0.0,
+    val spreadingFactor: Int = 0,
+    val codingRate: Int = 0,      // the N in coding rate 4/N
+    val analyzerUrls: String = "",
+    val mqttEndpoints: String = "",
+    val geoJson: String = "",     // raw GeoJSON geometry (Polygon / MultiPolygon), may be blank
+    val description: String = "",
+    @androidx.room.Ignore val isBuiltin: Boolean = false,
+) {
+    // Room needs a constructor that sets every persisted column; isBuiltin is @Ignore'd so DB rows
+    // always materialize as custom (isBuiltin = false).
+    constructor(
+        code: String, name: String, freqMhz: Double, bandwidthKhz: Double, spreadingFactor: Int,
+        codingRate: Int, analyzerUrls: String, mqttEndpoints: String, geoJson: String,
+        description: String,
+    ) : this(code, name, freqMhz, bandwidthKhz, spreadingFactor, codingRate, analyzerUrls,
+        mqttEndpoints, geoJson, description, isBuiltin = false)
+}
+
 /** Where a discovered contact was heard. */
 object DiscoverySource {
     const val SIDEPATH = "sidepath" // a Sidepath node's signed ANNOUNCE (topology)
@@ -55,6 +88,9 @@ data class DiscoveredContact(
     val lastAdvertisedMs: Long = 0L,
     val nodeAdvertisedMs: Long = 0L,
     val firstSeenMs: Long = 0L,
+    // Meshcore Network this contact was tiered to at discovery (the network of the bridge it came
+    // through). Set for MeshCore contacts heard via a gateway; blank for Sidepath-native nodes.
+    val networkCode: String = "",
 )
 
 /**

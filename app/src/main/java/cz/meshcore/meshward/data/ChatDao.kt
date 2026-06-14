@@ -123,6 +123,16 @@ interface ChatDao {
     @Query("DELETE FROM meshcore_heards WHERE messageId IN (SELECT id FROM messages WHERE peerHex = :peer)")
     suspend fun deleteMeshCoreHeardsForPeer(peer: String)
 
+    // ---- meshcore networks (user custom overrides; built-in defaults come from sidepath-protocol) ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertNetwork(network: MeshNetwork)
+
+    @Query("SELECT * FROM mesh_networks ORDER BY code")
+    fun networks(): Flow<List<MeshNetwork>>
+
+    @Query("DELETE FROM mesh_networks WHERE code = :code")
+    suspend fun deleteNetwork(code: String)
+
     // ---- discovered contacts ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDiscovered(contact: DiscoveredContact)

@@ -48,10 +48,12 @@ private sealed class Dest(val depth: Int) {
     data object RxLog : Dest(1)
     data object MeshCoreLog : Dest(1)
     data object Topology : Dest(1)
+    data object Networks : Dest(2)
     data object About : Dest(2)
     data object Debug : Dest(2)
     data class Conversation(val peer: String) : Dest(1)
     data class Profile(val peer: String) : Dest(2)
+    data class NetworkDetail(val code: String) : Dest(2)
     data class Trace(val peer: String) : Dest(3)
 
     /**
@@ -63,6 +65,7 @@ private sealed class Dest(val depth: Int) {
         get() = when (this) {
             is Conversation -> "conv:$peer"
             is Profile -> "profile:$peer"
+            is NetworkDetail -> "network:$code"
             is Trace -> "trace:$peer"
             else -> this::class.simpleName ?: "dest"
         }
@@ -79,6 +82,8 @@ fun ChatRoot(vm: ChatViewModel) {
     var showTopology by rememberSaveable { mutableStateOf(false) }
     var showAbout by rememberSaveable { mutableStateOf(false) }
     var showDebug by rememberSaveable { mutableStateOf(false) }
+    var showNetworks by rememberSaveable { mutableStateOf(false) }
+    var openNetworkDetail by rememberSaveable { mutableStateOf<String?>(null) }
     var tab by rememberSaveable { mutableStateOf(0) }
 
     // A meshcore:// deep link (contact/channel) asks us to open its conversation.
@@ -98,8 +103,10 @@ fun ChatRoot(vm: ChatViewModel) {
         openTrace != null -> Dest.Trace(openTrace!!)
         showAbout -> Dest.About
         showDebug -> Dest.Debug
+        openNetworkDetail != null -> Dest.NetworkDetail(openNetworkDetail!!)
         openProfile != null -> Dest.Profile(openProfile!!)
         openPeer != null -> Dest.Conversation(openPeer!!)
+        showNetworks -> Dest.Networks
         showTopology -> Dest.Topology
         showMeshCoreLog -> Dest.MeshCoreLog
         showRxLog -> Dest.RxLog
@@ -115,8 +122,10 @@ fun ChatRoot(vm: ChatViewModel) {
             }
             Dest.About -> showAbout = false
             Dest.Debug -> showDebug = false
+            is Dest.NetworkDetail -> openNetworkDetail = null
             is Dest.Profile -> openProfile = null
             is Dest.Conversation -> openPeer = null
+            Dest.Networks -> showNetworks = false
             Dest.MeshCoreLog -> showMeshCoreLog = false
             Dest.Topology -> showTopology = false
             Dest.RxLog -> showRxLog = false
@@ -198,7 +207,14 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenProfile = { openProfile = it },
                 onOpenAbout = { showAbout = true },
                 onOpenDebug = { showDebug = true },
+                onOpenNetworks = { showNetworks = true },
             )
+            Dest.Networks -> NetworksScreen(
+                vm,
+                onBack = popTop,
+                onOpenDetail = { openNetworkDetail = it },
+            )
+            is Dest.NetworkDetail -> NetworkDetailScreen(vm, dest.code, onBack = popTop)
             Dest.RxLog -> RxLogScreen(
                 vm,
                 onBack = popTop,
@@ -225,6 +241,7 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenProfile = { openProfile = it },
                 onOpenSettings = { showSettings = true },
                 onOpenAbout = { showAbout = true },
+                onOpenNetworkDetail = { openNetworkDetail = it },
             )
         }
         }
@@ -241,6 +258,7 @@ private fun TabsScaffold(
     onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenNetworkDetail: (String) -> Unit,
 ) {
     val conversations by vm.conversations.collectAsState()
     val unread = remember(conversations) { conversations.sumOf { it.unread } }
@@ -294,6 +312,7 @@ private fun TabsScaffold(
                     onOpenProfile = onOpenProfile,
                     onOpenSettings = onOpenSettings,
                     onOpenAbout = onOpenAbout,
+                    onOpenNetworkDetail = onOpenNetworkDetail,
                 )
                 else -> NetworkScreen(
                     vm,

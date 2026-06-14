@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,8 +65,10 @@ fun SettingsScreen(
     onOpenProfile: (String) -> Unit = {},
     onOpenAbout: () -> Unit = {},
     onOpenDebug: () -> Unit = {},
+    onOpenNetworks: () -> Unit = {},
 ) {
     val seedHex by vm.seedHex.collectAsState()
+    val activeNetwork by vm.activeNetwork.collectAsState()
     val description by vm.description.collectAsState()
     val name by vm.name.collectAsState()
     val effectiveName by vm.myName.collectAsState()
@@ -130,6 +133,33 @@ fun SettingsScreen(
                         Text(effectiveName.ifBlank { "My profile" }, style = MaterialTheme.typography.titleMedium)
                         Text(
                             if (nodeHex.isNotBlank()) "View my profile · $nodeHex" else "View my profile",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // Meshcore Network (the regional preset this device operates in)
+            Card(
+                Modifier.fillMaxWidth().clickable(onClick = onOpenNetworks),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Public, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.size(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Meshcore Networks", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            activeNetwork?.let { "Active: ${it.code} · ${it.name}" }
+                                ?: "Choose your regional network",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
