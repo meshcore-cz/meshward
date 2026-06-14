@@ -2,8 +2,11 @@ package cz.meshcore.meshward.ui
 
 import android.annotation.SuppressLint
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -112,14 +115,24 @@ fun TopologyScreen(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
+                    // Serve the bundled assets over a virtual https origin. file:///android_asset
+                    // sub-resource loading (the force-graph.min.js <script>) silently fails on some
+                    // WebView builds, leaving the graph blank — the asset loader avoids that entirely.
+                    val assetLoader = WebViewAssetLoader.Builder()
+                        .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(ctx))
+                        .build()
                     WebView(ctx).apply {
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        // No network is ever loaded — assets are local-only.
+                        // No network is ever loaded — only our bundled assets, via the asset loader.
                         settings.allowFileAccess = false
                         settings.allowContentAccess = false
                         webViewClient = object : WebViewClient() {
+                            override fun shouldInterceptRequest(
+                                view: WebView,
+                                request: WebResourceRequest,
+                            ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
                             override fun onPageFinished(view: WebView?, url: String?) { ready = true }
                         }
                         addJavascriptInterface(
@@ -129,7 +142,7 @@ fun TopologyScreen(
                             },
                             "AndroidBridge",
                         )
-                        loadUrl("file:///android_asset/topology.html")
+                        loadUrl("https://appassets.androidplatform.net/assets/topology.html")
                         webView = this
                     }
                 },

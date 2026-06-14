@@ -72,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.MeshCoreUri
 import cz.meshcore.meshward.ProfileInfo
+import cz.meshcore.meshward.hasRealLocation
 import cz.meshcore.meshward.data.ChannelKind
 import cz.meshcore.meshward.data.DiscoverySource
 import cz.meshcore.sidepath.meshcore.MeshCorePacket
@@ -103,7 +104,9 @@ fun ProfileScreen(
     val networks by vm.networks.collectAsState()
     val userLoc by vm.userLocation.collectAsState()
     // Distance to this node, when both we and it have coordinates.
-    val distance = userLoc?.takeIf { profile.hasGps }?.let { formatDistance(distanceMeters(it, profile.lat, profile.lon)) }
+    val distance = userLoc
+        ?.takeIf { profile.hasGps && hasRealLocation(profile.lat, profile.lon) && hasRealLocation(it.lat, it.lon) }
+        ?.let { formatDistance(distanceMeters(it, profile.lat, profile.lon)) }
     val announcements by remember(profile.nodeHex, profile.isChannel) {
         if (profile.isChannel || profile.nodeHex.isBlank()) flowOf(emptyList())
         else vm.announcementsForNode(profile.nodeHex)
@@ -599,11 +602,13 @@ private fun ProfileSection(title: String, content: @Composable ColumnScope.() ->
  * key) lives in the hero up top, and "in contacts" is shown as the "Saved" chip under the name. */
 @Composable
 private fun CommonDetails(p: ProfileInfo, distance: String?) {
+    // (0,0) is the "no fix" sentinel — don't surface it as a real location.
+    val hasLoc = p.hasGps && hasRealLocation(p.lat, p.lon)
     // Nothing common to show for a bare node — skip the section (and its header) entirely.
-    if (p.platform.isBlank() && !p.hasGps) return
+    if (p.platform.isBlank() && !hasLoc) return
     ProfileSection("Details") {
         if (p.platform.isNotBlank()) InfoRow("Platform", p.platform)
-        if (p.hasGps) LocationRow(p.lat, p.lon, distance)
+        if (hasLoc) LocationRow(p.lat, p.lon, distance)
     }
 }
 

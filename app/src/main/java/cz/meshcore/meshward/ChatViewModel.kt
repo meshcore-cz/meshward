@@ -237,6 +237,12 @@ data class ProfileInfo(
 data class UserLocation(val lat: Double, val lon: Double)
 
 /**
+ * Whether (lat, lon) is a real fix rather than Null Island (0,0) — the MeshCore "no GPS" sentinel.
+ * Used to gate distance display so a node (or us) without a fix isn't shown as ~thousands of km away.
+ */
+fun hasRealLocation(lat: Double, lon: Double): Boolean = lat != 0.0 || lon != 0.0
+
+/**
  * A unified row in the merged Chats list — a direct conversation or a channel. [isChannel]
  * selects the renderer; channel-only fields ([lastSender], [channelKind]) and DM-only [pubKeyHex]
  * are filled accordingly.
@@ -2461,6 +2467,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         val existing = dao.discoveredByPubKey(pubKeyHex)
         val firstSeen = existing?.firstSeenMs?.takeIf { it > 0 } ?: lastAdvertisedMs
+        // Null Island (0,0) is the MeshCore "no fix" sentinel — a node advertising it has no real
+        // position, so don't record it as having GPS (else distances read ~thousands of km away).
+        val realGps = hasGps && hasRealLocation(lat, lon)
         dao.upsertDiscovered(
             DiscoveredContact(
                 pubKeyHex = pubKeyHex,
@@ -2468,7 +2477,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 name = name,
                 source = source,
                 nodeType = nodeType,
-                hasGps = hasGps,
+                hasGps = realGps,
                 lat = lat,
                 lon = lon,
                 sigVerified = sigVerified,

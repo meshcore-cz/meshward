@@ -305,7 +305,7 @@ private fun AddChooserSheet(
         ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             .setBeepEnabled(false)
-            .setOrientationLocked(true)
+            .setCaptureActivity(cz.meshcore.meshward.PortraitCaptureActivity::class.java)
             .setPrompt("Scan a MeshCore contact or channel QR"),
     )
 
@@ -394,7 +394,7 @@ private fun NewChatSheet(vm: ChatViewModel, onStartChat: (String) -> Unit, onDis
         ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             .setBeepEnabled(false)
-            .setOrientationLocked(true)
+            .setCaptureActivity(cz.meshcore.meshward.PortraitCaptureActivity::class.java)
             .setPrompt("Scan a contact QR"),
     )
     val cleanKey = pubKey.trim().lowercase()

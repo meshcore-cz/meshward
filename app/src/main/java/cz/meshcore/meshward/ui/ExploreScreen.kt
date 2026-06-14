@@ -72,6 +72,7 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.LocationPrecision
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
+import cz.meshcore.meshward.hasRealLocation
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -150,9 +151,11 @@ fun ExploreScreen(
         roleFilter?.let { r -> list = list.filter { it.nodeType == r } }
         networkFilter?.let { n -> list = list.filter { it.networkCode == n } }
         if (hideSaved) list = list.filter { it.nodeHex !in savedContactKeys && it.pubKeyHex !in savedContactKeys }
-        val loc = userLoc
+        val loc = userLoc?.takeIf { hasRealLocation(it.lat, it.lon) }
         if (sortByDistance && loc != null) {
-            list = list.sortedBy { if (it.hasGps) distanceMeters(loc, it.lat, it.lon) else Float.MAX_VALUE }
+            list = list.sortedBy {
+                if (it.hasGps && hasRealLocation(it.lat, it.lon)) distanceMeters(loc, it.lat, it.lon) else Float.MAX_VALUE
+            }
         }
         list
     }
@@ -306,7 +309,9 @@ fun ExploreScreen(
                     }
                 } else {
                     items(shown, key = { it.pubKeyHex }) { d ->
-                        val distance = userLoc?.takeIf { d.hasGps }?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
+                        val distance = userLoc
+                            ?.takeIf { d.hasGps && hasRealLocation(d.lat, d.lon) && hasRealLocation(it.lat, it.lon) }
+                            ?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
                         val isSaved = d.nodeHex in savedContactKeys || d.pubKeyHex in savedContactKeys
                         DiscoveredRow(d, distance = distance, isSaved = isSaved) { onOpenProfile(d.nodeHex) }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
