@@ -28,6 +28,7 @@ import cz.meshcore.meshward.data.ChatDatabase
 import cz.meshcore.meshward.data.Contact
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
+import cz.meshcore.meshward.data.MeshCorePath
 import cz.meshcore.meshward.data.MeshNetwork
 import cz.meshcore.meshward.data.Message
 import cz.meshcore.meshward.data.MsgStatus
@@ -46,6 +47,7 @@ import cz.meshcore.sidepath.protocol.TraceResponseBody
 import cz.meshcore.sidepath.transport.PHYMode
 import cz.meshcore.sidepath.meshcore.MeshCoreAdvert
 import cz.meshcore.sidepath.meshcore.MeshCoreCodec
+import cz.meshcore.sidepath.meshcore.MeshCoreType
 import cz.meshcore.sidepath.service.SidepathService
 import cz.meshcore.sidepath.service.LogEntry
 import cz.meshcore.sidepath.service.MeshStats
@@ -657,6 +659,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val meshCoreHeards: StateFlow<Map<String, List<cz.meshcore.meshward.data.MeshCoreHeard>>> =
         dao.allMeshCoreHeards().map { it.groupBy { h -> h.messageId } }
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** Latest MeshCore returned PATH per contact, keyed by node id. */
+    fun meshCorePathForNode(nodeHex: String) = dao.meshCorePathForNode(nodeHex)
 
     /**
      * Direct conversations for the Chats tab: one row per peer we've messaged, plus every saved
@@ -1442,7 +1447,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Persist the latest MeshCore ADVERT per node, likewise.
         viewModelScope.launch {
             service.meshCorePackets.collect { list ->
-                list.filter { it.envelope?.type == cz.meshcore.sidepath.meshcore.MeshCoreType.ADVERT }
+                list.filter { it.envelope?.type == MeshCoreType.ADVERT }
                     .forEach { p ->
                         // Dedup per distinct packet (avoid re-decoding the advert on every emission).
                         if (!processed.add("ann:mc:${p.contentId.ifBlank { p.timestampMs.toString() }}")) return@forEach
@@ -1458,6 +1463,74 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
             }
+        }
+        // Persist incoming MeshCore PATH returns from saved contacts. A PATH teaches us a direct route
+        // back to a MeshCore peer; if it embeds an ACK, SidepathService handles delivery separately.
+        viewModelScope.launch {
+            service.meshCorePackets.collect { list ->
+                list.filter { it.envelope?.type == MeshCoreType.PATH }.forEach { p ->
+                    persistIncomingMeshCorePath(p)
+                }
+            }
+        }
+    }
+
+    private suspend fun persistIncomingMeshCorePath(p: cz.meshcore.sidepath.meshcore.MeshCorePacket) {
+        val seed = _seedHex.value.takeIf { it.length == 64 }?.hexToBytes() ?: return
+        val selfPub = myPubKeyHex.value.takeIf { it.length == 64 } ?: return
+        val env = p.envelope ?: return
+        val payload = env.payload
+        if (payload.size < 4) return
+        if ((payload[0].toInt() and 0xFF) != selfPub.substring(0, 2).toInt(16)) return
+        val srcHash = payload[1].toInt() and 0xFF
+        val candidates = contacts.value
+            .filter { it.isMeshCore && it.pubKeyHex.length == 64 && it.pubKeyHex.substring(0, 2).toInt(16) == srcHash }
+            .distinctBy { it.pubKeyHex }
+        for (contact in candidates) {
+            val pub = runCatching { contact.pubKeyHex.hexToBytes() }.getOrNull() ?: continue
+            val decoded = MeshCoreCodec.decodePathIdentity(seed, pub, payload) ?: continue
+            val hashSize = env.pathHashSize.takeIf { it > 0 } ?: 1
+            val hopCount = if (decoded.pathHex.isBlank()) 0 else decoded.pathHex.length / 2 / hashSize
+            val key = "mcpath:${contact.nodeHex}:${p.contentId}"
+            if (!processed.add(key)) return
+            dao.upsertMeshCorePath(
+                MeshCorePath(
+                    nodeHex = contact.nodeHex,
+                    pubKeyHex = contact.pubKeyHex,
+                    timestampMs = p.timestampMs,
+                    routeLabel = env.route,
+                    pathHex = decoded.pathHex,
+                    pathHashSize = hashSize,
+                    hopCount = hopCount,
+                    extraType = decoded.extraType,
+                    ackCrc = decoded.ackCrc,
+                    packetHex = p.raw.toHex(),
+                    contentId = p.contentId,
+                ),
+            )
+            val hopsText = if (hopCount == 0) "direct" else "$hopCount hop${if (hopCount == 1) "" else "s"}"
+            dao.insertMessage(
+                Message(
+                    id = key,
+                    peerHex = contact.nodeHex,
+                    senderHex = contact.nodeHex,
+                    incoming = true,
+                    text = "MeshCore path learned · $hopsText",
+                    timestampMs = p.timestampMs,
+                    status = MsgStatus.DELIVERED,
+                    routeHex = p.path.toRouteHex(),
+                    read = true,
+                    viaMeshCore = true,
+                    meshCoreType = MeshCoreType.PATH,
+                    meshCoreRoute = env.route,
+                    meshCoreHops = env.hopCount,
+                    meshCorePacketId = p.contentId,
+                    networkCode = p.networkCode,
+                    meshCorePacketHex = p.raw.toHex(),
+                    rssi = p.directRssi,
+                ),
+            )
+            return
         }
     }
 
@@ -1816,6 +1889,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteContact(nodeHex: String) {
         viewModelScope.launch {
             dao.deleteContact(nodeHex)
+            dao.deleteMeshCorePathForNode(nodeHex)
             dao.deleteReactionsForPeer(nodeHex)
             dao.deleteEchoesForPeer(nodeHex)
             dao.deleteMeshCoreHeardsForPeer(nodeHex)
@@ -1882,7 +1956,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // A MeshCore contact is reached over the bridge as a MeshCore TXT_MSG (not a native
             // encrypted Sidepath DM). Delivery (✓✓) comes from the radio ACK via the same isAck path.
             if (contact?.isMeshCore == true && pub != null) {
-                val id = service.sendMeshCoreDirect(pub, body)
+                val learnedPath = dao.meshCorePathForNode(peerHex).first()
+                val pathBytes = learnedPath?.pathHex?.hexToBytes()
+                val id = service.sendMeshCoreDirect(
+                    pub,
+                    body,
+                    path = pathBytes,
+                    pathHashSize = learnedPath?.pathHashSize ?: 0,
+                )
                 dao.insertMessage(
                     Message(
                         id = id?.toHex() ?: newId(),

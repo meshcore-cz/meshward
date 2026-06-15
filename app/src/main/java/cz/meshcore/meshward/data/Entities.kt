@@ -166,6 +166,26 @@ data class MeshCoreHeard(
     val carrierHex: String = "",
 )
 
+/**
+ * Latest MeshCore returned PATH learned for a contact. Keyed by [nodeHex], because for now the UI
+ * only needs the current route hint on the profile; later path configuration can keep history or
+ * multiple choices without changing the receive path.
+ */
+@Entity(tableName = "meshcore_paths")
+data class MeshCorePath(
+    @PrimaryKey val nodeHex: String,
+    val pubKeyHex: String,
+    val timestampMs: Long,
+    val routeLabel: String = "",
+    val pathHex: String = "",
+    val pathHashSize: Int = 0,
+    val hopCount: Int = 0,
+    val extraType: Int = 0,
+    val ackCrc: Long = 0L,
+    val packetHex: String = "",
+    val contentId: String = "",
+)
+
 /** Outgoing-message delivery state. */
 object MsgStatus {
     const val SENDING = 0

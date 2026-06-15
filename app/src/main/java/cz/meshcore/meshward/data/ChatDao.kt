@@ -131,6 +131,16 @@ interface ChatDao {
     @Query("DELETE FROM meshcore_heards WHERE messageId IN (SELECT id FROM messages WHERE peerHex = :peer)")
     suspend fun deleteMeshCoreHeardsForPeer(peer: String)
 
+    // ---- MeshCore PATHs (latest returned path per contact) ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMeshCorePath(path: MeshCorePath)
+
+    @Query("SELECT * FROM meshcore_paths WHERE nodeHex = :nodeHex LIMIT 1")
+    fun meshCorePathForNode(nodeHex: String): Flow<MeshCorePath?>
+
+    @Query("DELETE FROM meshcore_paths WHERE nodeHex = :nodeHex")
+    suspend fun deleteMeshCorePathForNode(nodeHex: String)
+
     // ---- meshcore networks (user custom overrides; built-in defaults come from sidepath-protocol) ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertNetwork(network: MeshNetwork)

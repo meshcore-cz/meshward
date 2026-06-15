@@ -111,10 +111,15 @@ fun ProfileScreen(
         if (profile.isChannel || profile.nodeHex.isBlank()) flowOf(emptyList())
         else vm.announcementsForNode(profile.nodeHex)
     }.collectAsState(emptyList())
+    val meshCorePath by remember(profile.nodeHex, profile.isChannel) {
+        if (profile.isChannel || profile.nodeHex.isBlank()) flowOf(null)
+        else vm.meshCorePathForNode(profile.nodeHex)
+    }.collectAsState(null)
     val sidepathAnn = announcements.firstOrNull { it.source == DiscoverySource.SIDEPATH }
     val meshAnn = announcements.firstOrNull { it.source == DiscoverySource.MESHCORE }
     var showAnnounce by remember { mutableStateOf<RxPacket?>(null) }
     var showAdvert by remember { mutableStateOf<MeshCorePacket?>(null) }
+    var showPathPacket by remember { mutableStateOf<MeshCorePacket?>(null) }
     // Ticks so the announcement ages stay live while the profile is open.
     val nowMs by produceState(initialValue = System.currentTimeMillis()) {
         while (true) {
@@ -344,6 +349,17 @@ fun ProfileScreen(
                                 showAdvert = vm.decodeMeshCorePacketRaw(meshAnn.rawHex, meshAnn.timestampMs)
                             }
                         }
+                        if (meshCorePath != null) {
+                            val p = meshCorePath!!
+                            val hashSize = p.pathHashSize.takeIf { it > 0 } ?: 1
+                            val hopText = if (p.hopCount == 0) "direct" else "${p.hopCount} hop${if (p.hopCount == 1) "" else "s"}"
+                            val pathText = if (p.hopCount == 0) hopText else "$hopText · $hashSize-byte hash"
+                            InfoRow("Returned path", pathText)
+                            if (p.routeLabel.isNotBlank()) InfoRow("Path route", p.routeLabel)
+                            AnnouncementRow("Path learned", formatRelativeAge(p.timestampMs, nowMs)) {
+                                showPathPacket = vm.decodeMeshCorePacketRaw(p.packetHex, p.timestampMs)
+                            }
+                        }
                     }
                 }
             }
@@ -452,6 +468,9 @@ fun ProfileScreen(
     }
     showAdvert?.let {
         MeshCoreDetailDialog(it, vm, onDismiss = { showAdvert = null })
+    }
+    showPathPacket?.let {
+        MeshCoreDetailDialog(it, vm, onDismiss = { showPathPacket = null })
     }
 }
 

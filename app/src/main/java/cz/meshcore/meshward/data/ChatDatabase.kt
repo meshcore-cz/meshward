@@ -10,8 +10,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // v3: NodeIDs widened 8→10 bytes (protocol v3), so old peer/contact ids are stale —
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
-    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, NodeAnnouncement::class, MeshNetwork::class],
-    version = 21,
+    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, MeshCorePath::class, NodeAnnouncement::class, MeshNetwork::class],
+    version = 22,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -184,12 +184,27 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v21→v22: persist the latest MeshCore returned PATH learned per contact.
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `meshcore_paths` (" +
+                        "`nodeHex` TEXT NOT NULL, `pubKeyHex` TEXT NOT NULL, " +
+                        "`timestampMs` INTEGER NOT NULL, `routeLabel` TEXT NOT NULL, " +
+                        "`pathHex` TEXT NOT NULL, `pathHashSize` INTEGER NOT NULL, " +
+                        "`hopCount` INTEGER NOT NULL, `extraType` INTEGER NOT NULL, " +
+                        "`ackCrc` INTEGER NOT NULL, `packetHex` TEXT NOT NULL, " +
+                        "`contentId` TEXT NOT NULL, PRIMARY KEY(`nodeHex`))"
+                )
+            }
+        }
+
         fun get(context: Context, dbName: String = "meshward.db"): ChatDatabase = synchronized(this) {
             instances[dbName] ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 dbName,
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22)
                 .fallbackToDestructiveMigration()
                 .build().also { instances[dbName] = it }
         }

@@ -827,6 +827,43 @@ private fun MessageBubble(
 ) {
     val mine = !msg.incoming
     val hasReactions = reactions.isNotEmpty()
+    val isMeshCorePathInfo = msg.id.startsWith("mcpath:")
+    if (isMeshCorePathInfo) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongPress),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        msg.text,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        formatMessageTime(msg.timestampMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    )
+                }
+            }
+        }
+        return
+    }
     // The network shown on this message's MeshCore chips: the one recorded on the message, falling
     // back to the channel's current network for rows saved before it was persisted.
     val net = msg.networkCode.ifBlank { networkCode }
