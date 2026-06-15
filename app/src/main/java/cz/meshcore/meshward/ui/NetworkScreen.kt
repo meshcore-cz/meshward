@@ -267,7 +267,15 @@ private fun PeerRow(vm: ChatViewModel, peer: PeerInfo, pubKeyHex: String?, onCli
     // Resolve to the same display name used everywhere (contact alias → wire name → derived).
     val label = vm.nameForHex(hex).ifBlank { nameFromPubKey(pubKeyHex ?: "") }.ifBlank { hex.take(16) }
     val platform = vm.platformForHex(hex)
-    val linkLabel = if (peer.degraded) "degraded" else if (peer.incoming) "inbound" else "outbound"
+    // §4.4 multi-link: a peer may be held over both an inbound and an outbound link at once. Show each
+    // direction (in+out when both) and the physical link count so a redundant pair is visible.
+    val direction = when {
+        peer.degraded -> "degraded"
+        peer.inbound && peer.outbound -> "in+out"
+        peer.inbound -> "inbound"
+        else -> "outbound"
+    }
+    val linkLabel = if (peer.linkCount > 1) "$direction · ${peer.linkCount} links" else direction
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
