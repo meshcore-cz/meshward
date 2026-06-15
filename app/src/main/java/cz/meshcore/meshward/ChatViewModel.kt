@@ -1271,14 +1271,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 service.setMeshCoreChannelSecrets(chans.map { it.pskHex.hexToBytes() })
             }
         }
-        // Push known MeshCore contacts' public keys so the service can resolve the full sender key
-        // (from a DM's 1-byte src hash) and decrypt incoming MeshCore direct messages.
+        // Push saved contacts' public keys so the service can resolve the full sender key (from a DM's
+        // 1-byte src hash) and decrypt incoming MeshCore direct messages. We push *all* contact keys,
+        // not just MeshCore-flagged ones: the service filters candidates by the src hash and the
+        // MeshCore MAC rejects every wrong key, so a non-MeshCore contact's key is harmless to try —
+        // and this stays correct even if a contact's isMeshCore flag was never set (see repair below).
         viewModelScope.launch {
             contacts.collect { list ->
                 service.setMeshCoreContactKeys(
-                    list.filter { it.isMeshCore && it.pubKeyHex.length == 64 }
+                    list.filter { it.pubKeyHex.length == 64 }
                         .mapNotNull { runCatching { it.pubKeyHex.hexToBytes() }.getOrNull() },
                 )
+            }
+        }
+        // Repair contacts saved before their MeshCore origin was known: if a contact matches a node we
+        // discovered over MeshCore (by public key), flag it so outgoing messages route over the bridge
+        // as a TXT_MSG (ChatViewModel.sendMessage) instead of failing as a native Sidepath DM.
+        viewModelScope.launch {
+            contacts.collect { list ->
+                val notFlagged = list.filter { !it.isMeshCore && it.pubKeyHex.length == 64 }
+                if (notFlagged.isEmpty()) return@collect
+                val meshCorePubs = dao.discoveredByPubKeys(notFlagged.map { it.pubKeyHex })
+                    .filter { it.source == DiscoverySource.MESHCORE }
+                    .map { it.pubKeyHex }
+                    .toHashSet()
+                notFlagged.filter { it.pubKeyHex in meshCorePubs }
+                    .forEach { dao.markContactMeshCore(it.nodeHex) }
             }
         }
         // Ingest discovered Sidepath nodes from the live topology into the discovered-contacts table.
@@ -1627,9 +1645,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun startChat(node: AdvertisedNode) {
         viewModelScope.launch {
             val existing = dao.contactByNode(node.nodeHex)
+            // Carry over MeshCore origin so the contact is reached over the bridge (a native Sidepath DM
+            // to a MeshCore node would fail). AdvertisedNode has no source, so resolve it from the
+            // discovered-contacts table by public key.
+            val isMeshCore = existing?.isMeshCore == true ||
+                dao.discoveredByPubKey(node.pubKeyHex)?.source == DiscoverySource.MESHCORE
             dao.upsertContact(
                 Contact(node.nodeHex, node.pubKeyHex, node.description,
-                    localName = existing?.localName.orEmpty(), isMeshCore = existing?.isMeshCore ?: false,
+                    localName = existing?.localName.orEmpty(), isMeshCore = isMeshCore,
                     nameIsCustom = existing?.nameIsCustom ?: false),
             )
         }
@@ -1647,10 +1670,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val alias = name.trim()
         viewModelScope.launch {
             val existing = dao.contactByNode(nodeHex)
+            // If this key is a node we discovered over MeshCore, flag it so messages route over the
+            // bridge as a TXT_MSG rather than failing as a native Sidepath DM.
+            val isMeshCore = existing?.isMeshCore == true ||
+                dao.discoveredByPubKey(pub)?.source == DiscoverySource.MESHCORE
             dao.upsertContact(
                 Contact(nodeHex, pub, existing?.description.orEmpty(),
                     localName = alias.ifBlank { existing?.localName.orEmpty() },
-                    isMeshCore = existing?.isMeshCore ?: false,
+                    isMeshCore = isMeshCore,
                     nameIsCustom = alias.isNotBlank() || (existing?.nameIsCustom ?: false)),
             )
         }

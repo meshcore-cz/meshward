@@ -67,6 +67,14 @@ interface ChatDao {
     )
     suspend fun refreshMeshCoreName(nodeHex: String, name: String)
 
+    /**
+     * Flags an existing contact as a MeshCore node. Used to repair contacts that were saved before
+     * their MeshCore origin was known (e.g. added via a path that didn't set the flag), so outgoing
+     * messages route over the bridge as a MeshCore TXT_MSG and incoming DMs get decrypted.
+     */
+    @Query("UPDATE contacts SET isMeshCore = 1 WHERE nodeHex = :nodeHex AND isMeshCore = 0")
+    suspend fun markContactMeshCore(nodeHex: String)
+
     @Query("DELETE FROM contacts WHERE nodeHex = :nodeHex")
     suspend fun deleteContact(nodeHex: String)
 
