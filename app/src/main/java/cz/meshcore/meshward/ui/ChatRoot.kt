@@ -301,8 +301,8 @@ private fun TabsScaffold(
                 NavigationBarItem(
                     selected = tab == 2,
                     onClick = { onSelectTab(2) },
-                    icon = { Icon(Icons.Default.Hub, contentDescription = "Network") },
-                    label = { Text("Network") },
+                    icon = { Icon(Icons.Default.Hub, contentDescription = "Sidepath") },
+                    label = { Text("Sidepath") },
                 )
             }
         },

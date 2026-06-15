@@ -44,9 +44,9 @@ import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.ConnState
 import cz.meshcore.meshward.nameFromPubKey
 import cz.meshcore.meshward.toHex
+import cz.meshcore.sidepath.protocol.Capabilities
 import cz.meshcore.sidepath.service.MeshStats
 import cz.meshcore.sidepath.service.PeerInfo
-import cz.meshcore.sidepath.service.RSSI_UNKNOWN
 import cz.meshcore.sidepath.service.TopologyEntry
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,18 +66,13 @@ fun NetworkScreen(
     val nav = LocalMeshNav.current
     val myHex = myNode.toHex()
 
-    // Identicons are drawn from a node's 32-byte public key; learn it from the live topology.
-    val pubKeys = remember(topology) {
-        topology.filter { it.publicKey.size == 32 }
-            .associate { it.nodeId.toHex() to it.publicKey.toHex() }
-    }
     // Standalone Trace tool; seed it with a healthy direct peer when we have one, else open empty.
     val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex().orEmpty()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Network") },
+                title = { Text("Sidepath") },
                 actions = {
                     // Start/stop the mesh radio right from the page header.
                     Text(
@@ -96,9 +91,10 @@ fun NetworkScreen(
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { padding ->
-        val others = topology.filter { it.nodeId.toHex() != myHex }
+        // One unified node list (connected peers + nodes learned from announces), mirroring `sp peers`.
+        val nodes = remember(peers, topology, myHex) { mergePeerNodes(peers, topology, myHex) }
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            item { ConnectionBanner(status, peers.size, others.size) }
+            item { ConnectionBanner(status, peers.size, nodes.size) }
 
             item {
                 Row(
@@ -130,24 +126,10 @@ fun NetworkScreen(
                 )
             }
 
-            item { SectionHeader("Connected peers (${peers.size})") }
-            if (peers.isEmpty()) {
-                item { EmptyLine("No peers connected.") }
-            } else {
-                // Keys must be unique across the whole list; a peer is usually also in the
-                // topology below, so namespace the keys to avoid a collision crash.
-                items(peers, key = { "peer:${it.nodeId.toHex()}" }) { peer ->
-                    PeerRow(vm, peer, pubKeys[peer.nodeId.toHex()]) { onOpenProfile(peer.nodeId.toHex()) }
-                }
-            }
-
-            item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
-
-            item { SectionHeader("Topology") }
+            // Topology graph entry point. The graph view isn't wired up yet; the button stays so the
+            // entry point is visible and ready once it works.
             item {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
                     FilledTonalButton(onClick = nav.openTopology, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
@@ -156,12 +138,12 @@ fun NetworkScreen(
                 }
             }
 
-            item { SectionHeader("Known topology (${others.size})") }
-            if (others.isEmpty()) {
-                item { EmptyLine("No nodes learned yet.") }
+            item { SectionHeader("Peers (${nodes.size})") }
+            if (nodes.isEmpty()) {
+                item { EmptyLine("No nodes known yet.") }
             } else {
-                items(others, key = { "topo:${it.nodeId.toHex()}" }) { node ->
-                    TopologyRow(node, node.publicKey.takeIf { it.size == 32 }?.toHex()) { onOpenProfile(node.nodeId.toHex()) }
+                items(nodes, key = { "node:${it.hex}" }) { node ->
+                    PeerRow(vm, node) { onOpenProfile(node.hex) }
                 }
             }
 
@@ -261,21 +243,78 @@ fun lastPacketLabel(atMs: Long?): String {
     return "Last packet received $ago"
 }
 
+/**
+ * One node as shown in the unified Peers list: a live BLE [peer] (when connected) and/or the [topo]
+ * entry learned from its signed announce. At least one of the two is always present.
+ */
+private data class PeerNode(
+    val hex: String,
+    val peer: PeerInfo?,
+    val topo: TopologyEntry?,
+)
+
+/**
+ * Merges connected peers and learned topology into one CLI-style node list (mirrors `sp peers`): one
+ * row per node, connected nodes first, the rest by id. The local node is excluded.
+ */
+private fun mergePeerNodes(
+    peers: List<PeerInfo>,
+    topology: List<TopologyEntry>,
+    myHex: String,
+): List<PeerNode> {
+    val peerByHex = peers.associateBy { it.nodeId.toHex() }
+    val topoByHex = topology.filter { it.nodeId.toHex() != myHex }.associateBy { it.nodeId.toHex() }
+    val hexes = LinkedHashSet<String>().apply { addAll(peerByHex.keys); addAll(topoByHex.keys) }
+    return hexes.map { PeerNode(it, peerByHex[it], topoByHex[it]) }
+        .sortedWith(compareByDescending<PeerNode> { it.peer != null }.thenBy { it.hex })
+}
+
+/** Compact relay/gateway capability flags, CLI-style ("relay,gw"); null when nothing notable is set. */
+private fun capsLabel(caps: Capabilities?): String? = when {
+    caps == null -> null
+    caps.isRelay() && caps.isGateway() -> "relay,gw"
+    caps.isRelay() -> "relay"
+    caps.isGateway() -> "gw"
+    else -> null
+}
+
+/** Short "Ns/Nm/Nh" age for a wall-clock timestamp (ms); blank for never. */
+private fun shortAgo(atMs: Long): String {
+    if (atMs <= 0L) return ""
+    val s = ((System.currentTimeMillis() - atMs) / 1000).coerceAtLeast(0)
+    return when {
+        s < 60 -> "${s}s"
+        s < 3600 -> "${s / 60}m"
+        else -> "${s / 3600}h"
+    }
+}
+
 @Composable
-private fun PeerRow(vm: ChatViewModel, peer: PeerInfo, pubKeyHex: String?, onClick: () -> Unit) {
-    val hex = peer.nodeId.toHex()
+private fun PeerRow(vm: ChatViewModel, node: PeerNode, onClick: () -> Unit) {
+    val hex = node.hex
+    val peer = node.peer
+    val topo = node.topo
+    // Identicons are drawn from a node's 32-byte public key; prefer the announce, fall back to the link.
+    val pubKeyHex = (topo?.publicKey?.takeIf { it.size == 32 } ?: peer?.publicKey?.takeIf { it.size == 32 })?.toHex()
     // Resolve to the same display name used everywhere (contact alias → wire name → derived).
-    val label = vm.nameForHex(hex).ifBlank { nameFromPubKey(pubKeyHex ?: "") }.ifBlank { hex.take(16) }
-    val platform = vm.platformForHex(hex)
-    // §4.4 multi-link: a peer may be held over both an inbound and an outbound link at once. Show each
-    // direction (in+out when both) and the physical link count so a redundant pair is visible.
-    val direction = when {
+    val label = vm.nameForHex(hex)
+        .ifBlank { topo?.name.orEmpty() }
+        .ifBlank { nameFromPubKey(pubKeyHex ?: "") }
+        .ifBlank { hex.take(16) }
+    val platform = vm.platformForHex(hex).ifBlank { topo?.platform.orEmpty() }
+    val caps = peer?.caps ?: topo?.caps
+
+    // CONN column: §4.4 multi-link — a peer may be held over both an inbound and an outbound link at
+    // once. Show each direction (in+out when both) and the physical link count for a redundant pair.
+    val connLabel = when {
+        peer == null -> null
         peer.degraded -> "degraded"
         peer.inbound && peer.outbound -> "in+out"
         peer.inbound -> "inbound"
         else -> "outbound"
     }
-    val linkLabel = if (peer.linkCount > 1) "$direction · ${peer.linkCount} links" else direction
+    val linkLabel = connLabel?.let { if (peer != null && peer.linkCount > 1) "$it · ${peer.linkCount} links" else it }
+
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -283,48 +322,53 @@ private fun PeerRow(vm: ChatViewModel, peer: PeerInfo, pubKeyHex: String?, onCli
         Avatar(seed = hex, label = label, identiconKey = pubKeyHex, onClick = onClick)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(label, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(label, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                if (linkLabel != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        linkLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (peer?.degraded == true) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                    )
+                }
+            }
             Text(
                 listOfNotNull(hex.take(16), platform.takeIf { it.isNotBlank() }).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                SignalLabel(peer.rssi, "rssi", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    listOfNotNull(
-                        linkLabel,
-                        peer.txPhy.toString(),
-                        peer.connectedSinceMs.takeIf { it > 0 }?.let { "for ${shortDuration(System.currentTimeMillis() - it)}" },
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            // Detail line: live link facts (PHY, uptime) when connected, then announce-derived facts
+            // (caps, neighbor count, last announce) — the same data the CLI peers table carries.
+            val nbrs = topo?.neighborIds?.size ?: 0
+            val detail = buildList {
+                if (peer != null) {
+                    add(peer.txPhy.toString())
+                    peer.connectedSinceMs.takeIf { it > 0 }?.let { add("up ${shortDuration(System.currentTimeMillis() - it)}") }
+                    peer.lastRecvMs.takeIf { it > 0 }?.let { add("rx ${shortAgo(it)} ago") }
+                }
+                capsLabel(caps)?.let { add(it) }
+                if (nbrs > 0) add("$nbrs nbr${if (nbrs == 1) "" else "s"}")
+                topo?.lastAnnounceMs?.takeIf { it > 0 }?.let { add("ann ${shortAgo(it)} ago") }
             }
-        }
-    }
-}
-
-@Composable
-private fun TopologyRow(node: TopologyEntry, pubKeyHex: String?, onClick: () -> Unit) {
-    val label = node.name.ifBlank { nameFromPubKey(pubKeyHex ?: "") }
-        .ifBlank { node.nodeId.toHex().take(16) }
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Avatar(seed = node.nodeId.toHex(), label = label, size = 36, identiconKey = pubKeyHex, onClick = onClick)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(label, fontWeight = FontWeight.Medium, maxLines = 1)
-            val nb = node.neighborIds.size
-            val platform = node.platform.ifBlank { "unknown platform" }
-            Text(
-                "${node.nodeId.toHex().take(16)} · $platform · $nb neighbor${if (nb == 1) "" else "s"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (peer != null) SignalLabel(peer.rssi, "rssi", style = MaterialTheme.typography.bodySmall)
+                if (detail.isNotEmpty()) {
+                    Text(
+                        detail.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
     }
 }
