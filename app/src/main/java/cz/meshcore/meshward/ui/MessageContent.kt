@@ -123,13 +123,25 @@ private fun splitBlocks(text: String): List<Block> {
         }
         val trimmed = line.trimStart()
         when {
-            trimmed.isEmpty() -> {} // collapse blank lines
             trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("+ ") ->
                 out += Block.Bullet(trimmed.substring(2))
             orderedRe.matches(trimmed) -> orderedRe.find(trimmed)!!.let {
                 out += Block.Ordered(it.groupValues[1].toInt(), it.groupValues[2])
             }
-            else -> out += Block.Paragraph(line)
+            else -> {
+                // Accumulate consecutive plain lines (including blank lines) into a single
+                // paragraph so that \n and \n\n are preserved when rendered by Text.
+                val buf = StringBuilder(line)
+                while (i + 1 < lines.size) {
+                    val next = lines[i + 1].trimStart()
+                    if (next.startsWith("```") || next.startsWith("- ") || next.startsWith("* ") ||
+                        next.startsWith("+ ") || orderedRe.matches(next)) break
+                    buf.append("\n").append(lines[i + 1])
+                    i++
+                }
+                val content = buf.toString()
+                if (content.isNotBlank()) out += Block.Paragraph(content)
+            }
         }
         i++
     }

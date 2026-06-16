@@ -36,8 +36,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.CallMade
-import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -52,7 +50,6 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
@@ -79,11 +76,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import android.widget.Toast
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -344,14 +343,19 @@ fun ConversationScreen(
         // Jump straight to the newest message on first load (no visible scroll-down), then
         // animate to the bottom only for messages arriving while the chat is open. Skipped
         // while searching so the filtered view doesn't auto-scroll.
-        var positioned by remember(peerHex) { mutableStateOf(false) }
+        // rememberSaveable so these survive navigating to a profile and back; keyed on peerHex
+        // so they reset when opening a different conversation.
+        var positioned by rememberSaveable(peerHex) { mutableStateOf(false) }
+        var stickToBottom by rememberSaveable(peerHex) { mutableStateOf(true) }
         LaunchedEffect(messages.size) {
             if (searching || messages.isEmpty()) return@LaunchedEffect
             // +1 for the header panel item that precedes the messages.
             if (!positioned) {
                 listState.scrollToItem(messages.size)
                 positioned = true
-            } else {
+            } else if (stickToBottom) {
+                // Only animate to new messages when already pinned at the bottom;
+                // don't yank the user down if they've scrolled up to read history.
                 listState.animateScrollToItem(messages.size)
             }
         }
@@ -370,7 +374,6 @@ fun ConversationScreen(
         // animation the shrinking viewport makes canScrollForward true and would disable follow.
         val density = androidx.compose.ui.platform.LocalDensity.current
         val imeBottomPx = WindowInsets.ime.getBottom(density)
-        var stickToBottom by remember(peerHex) { mutableStateOf(true) }
         LaunchedEffect(imeBottomPx, listState.canScrollForward) {
             if (imeBottomPx == 0) stickToBottom = !listState.canScrollForward
         }
@@ -394,7 +397,7 @@ fun ConversationScreen(
             modifier = Modifier.fillMaxSize().padding(padding),
             // Minimal breathing room at the top and bottom of the message list.
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             // A header panel with a big avatar + basic details; also fills the empty space of a
             // brand-new conversation. Hidden while searching so results aren't pushed down.
@@ -422,10 +425,38 @@ fun ConversationScreen(
                         else unknownMention = sender
                     }
                 } else null
-                Column {
+                val prev = shown.getOrNull(i - 1)
+                val next = shown.getOrNull(i + 1)
+                // Sender name on the FIRST message of a consecutive same-sender group.
+                val showSenderHeader = when {
+                    !isChannel || !msg.incoming -> false
+                    searching -> true
+                    prev == null || differentDay(prev.timestampMs, msg.timestampMs) -> true
+                    prev.id.startsWith("mcpath:") -> true
+                    !prev.incoming -> true
+                    msg.timestampMs - prev.timestampMs > 5 * 60_000L -> true
+                    msg.senderHex.isNotBlank() && prev.senderHex.isNotBlank() ->
+                        msg.senderHex != prev.senderHex
+                    else -> msg.senderName.trim() != prev.senderName.trim()
+                }
+                // Avatar on the LAST message of a group — next message is different sender or absent.
+                val showAvatar = when {
+                    !isChannel || !msg.incoming -> false
+                    next == null || differentDay(msg.timestampMs, next.timestampMs) -> true
+                    next.id.startsWith("mcpath:") -> true
+                    !next.incoming -> true
+                    next.timestampMs - msg.timestampMs > 5 * 60_000L -> true
+                    msg.senderHex.isNotBlank() && next.senderHex.isNotBlank() ->
+                        msg.senderHex != next.senderHex
+                    else -> msg.senderName.trim() != next.senderName.trim()
+                }
+                // Collapsed = continuation of same-sender group (no date separator between).
+                // Use minimal gap; the 2dp LazyColumn spacing + 4dp here = 6dp for normal messages.
+                val isCollapsed = isChannel && msg.incoming && !showSenderHeader &&
+                    !msg.id.startsWith("mcpath:") && !searching
+                Column(Modifier.padding(top = if (isCollapsed) 0.dp else 4.dp)) {
                     // Date separator whenever the day changes (first message always gets one).
                     if (!searching) {
-                        val prev = shown.getOrNull(i - 1)
                         if (prev == null || differentDay(prev.timestampMs, msg.timestampMs)) {
                             DateSeparator(dateLabel(msg.timestampMs))
                         }
@@ -437,6 +468,9 @@ fun ConversationScreen(
                         reactions = reactionsByMsg[msg.id].orEmpty(),
                         myHex = myHex,
                         networkCode = activeNetwork?.code.orEmpty(),
+                        showSenderHeader = showSenderHeader,
+                        showAvatar = showAvatar,
+                        senderIdenticonKey = matchedHex,
                         mentionResolved = { name -> resolveName(name) != null },
                         onChipClick = { emoji -> reactionsEmoji = emoji; reactionsFor = msg },
                         onLongPress = { actionsFor = msg },
@@ -748,63 +782,6 @@ private fun ReactionTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** The teal MeshCore-bridge pill, shared by incoming and outgoing messages. [arrow] (optional) points
- * the way the message crossed the bridge (in for received, out for relayed); [label] is the network
- * code or the hop count. */
-@Composable
-private fun MeshCorePill(arrow: androidx.compose.ui.graphics.vector.ImageVector?, label: String) {
-    Surface(
-        color = Color(0xFF00838F).copy(alpha = 0.16f),
-        shape = RoundedCornerShape(6.dp),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            if (arrow != null) {
-                Icon(
-                    arrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(11.dp),
-                    tint = Color(0xFF00838F),
-                )
-            }
-            Text(
-                label,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF00838F),
-            )
-        }
-    }
-}
-
-/** Marks an incoming channel message that arrived over the MeshCore bridge: an inbound-arrow pill with
- * the bridged network code ([networkCode], or "MeshCore" when unknown), followed by a matching pill
- * with the LoRa hop count ([hops]). */
-@Composable
-private fun MeshCoreBadge(hops: Int, networkCode: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        MeshCorePill(Icons.AutoMirrored.Filled.CallReceived, networkCode.ifBlank { "MeshCore" })
-        MeshCorePill(
-            null,
-            when {
-                hops <= 0 -> "direct"
-                hops == 1 -> "1 hop"
-                else -> "$hops hops"
-            },
-        )
-    }
-}
-
-/** Marks our own channel message once a gateway relayed it onto MeshCore (ACK_BRIDGED). Shows the
- * outbound arrow and the bridged network code ([networkCode], or "MeshCore" when unknown). */
-@Composable
-private fun BridgedBadge(networkCode: String) =
-    MeshCorePill(Icons.AutoMirrored.Filled.CallMade, networkCode.ifBlank { "MeshCore" })
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -820,6 +797,9 @@ private fun MessageBubble(
     reactions: List<cz.meshcore.meshward.data.Reaction>,
     myHex: String,
     networkCode: String,
+    showSenderHeader: Boolean,
+    showAvatar: Boolean,
+    senderIdenticonKey: String?,
     mentionResolved: (String) -> Boolean,
     onChipClick: (String) -> Unit,
     onLongPress: () -> Unit,
@@ -864,38 +844,62 @@ private fun MessageBubble(
         }
         return
     }
-    // The network shown on this message's MeshCore chips: the one recorded on the message, falling
+    // The network shown on this message's MeshCore info: the one recorded on the message, falling
     // back to the channel's current network for rows saved before it was persisted.
     val net = msg.networkCode.ifBlank { networkCode }
     Row(
         // Reserve room below for the reaction pills, which overhang the bubble's bottom edge.
         Modifier.fillMaxWidth().padding(bottom = if (hasReactions) 14.dp else 0.dp),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Bottom,
     ) {
+        // Avatar column: fixed 32 dp wide so all bubbles in the group align.
+        // Avatar is shown only on the LAST message of a consecutive same-sender run.
+        if (!mine && isChannel) {
+            Box(Modifier.size(32.dp)) {
+                if (showAvatar) {
+                    Avatar(
+                        seed = senderIdenticonKey ?: senderLabel,
+                        label = senderLabel,
+                        size = 32,
+                        identiconKey = senderIdenticonKey,
+                        onClick = onSenderClick,
+                    )
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+        }
+        // Incoming channel bubbles: left corners flatten toward the avatar to signal grouping.
+        //   single  → all 16dp  (showSenderHeader && showAvatar)
+        //   first   → no bottom-left rounding  (showSenderHeader && !showAvatar)
+        //   middle  → no left rounding at all  (!showSenderHeader && !showAvatar)
+        //   last    → no top-left rounding  (!showSenderHeader && showAvatar)
+        val bubbleShape = if (!mine && isChannel) {
+            RoundedCornerShape(
+                topStart = if (showSenderHeader) 16.dp else 4.dp,
+                topEnd = 16.dp,
+                bottomEnd = 16.dp,
+                bottomStart = if (showAvatar) 16.dp else 4.dp,
+            )
+        } else RoundedCornerShape(16.dp)
         Box {
         Surface(
             color = if (mine) MaterialTheme.colorScheme.primaryContainer
             else MaterialTheme.colorScheme.surfaceContainerHigh,
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.widthIn(max = 300.dp)
+            shape = bubbleShape,
+            modifier = Modifier.widthIn(max = 280.dp)
                 .combinedClickable(onClick = onClick, onLongClick = onLongPress),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                if (isChannel && msg.incoming) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            senderLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = senderColor,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
-                        )
-                        if (msg.viaMeshCore) MeshCoreBadge(msg.meshCoreHops, net)
-                    }
-                } else if (mine && msg.bridgedToMeshCore) {
-                    // Our own message, relayed onto MeshCore — show the bridge pill at the top,
-                    // mirroring where the incoming badge sits (after the sender name).
-                    BridgedBadge(net)
+                // Sender name: only on first message of a consecutive group.
+                if (isChannel && msg.incoming && showSenderHeader) {
+                    Text(
+                        senderLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = senderColor,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
+                    )
                 }
                 MessageContent(
                     msg.text,
@@ -904,11 +908,16 @@ private fun MessageBubble(
                     mentionResolved = mentionResolved,
                 )
                 Spacer(Modifier.size(2.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Meta row: 50% opacity applied to the whole row so every element —
+                // text, icons, and delivery ticks — reads at the same reduced weight.
+                Row(
+                    modifier = Modifier.alpha(0.5f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     Text(
                         formatMessageTime(msg.timestampMs),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (mine) {
                         if (isChannel) {
@@ -921,23 +930,25 @@ private fun MessageBubble(
                                 Text(
                                     "try ${delivery.attemptsSent}/${delivery.maxTries}",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
                     } else RouteIndicator(msg.routeHex)
-                    // Repeats of this (flooded) message we heard echoed back across the mesh.
-                    if (mine && repeatCount > 0) {
-                        Icon(
-                            Icons.Default.Repeat,
-                            contentDescription = "repeats heard",
-                            modifier = Modifier.size(13.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    // MeshCore routing info last: "· CZ · 4 hops" or "· CZ" for bridged outgoing.
+                    if (msg.incoming && msg.viaMeshCore) {
+                        val hopText = when {
+                            msg.meshCoreHops <= 0 -> "direct"
+                            msg.meshCoreHops == 1 -> "1 hop"
+                            else -> "${msg.meshCoreHops} hops"
+                        }
                         Text(
-                            "$repeatCount",
+                            "· ${net.ifBlank { "MeshCore" }} · $hopText",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else if (mine && msg.bridgedToMeshCore) {
+                        Text(
+                            "· ${net.ifBlank { "MeshCore" }}",
+                            style = MaterialTheme.typography.labelSmall,
                         )
                     }
                 }

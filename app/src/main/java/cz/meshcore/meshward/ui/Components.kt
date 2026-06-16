@@ -150,13 +150,25 @@ private val avatarColors = listOf(
 /** How avatars are drawn app-wide; provided at the root from the user's setting. */
 val LocalAvatarStyle = staticCompositionLocalOf { AvatarStyle.IDENTICON }
 
+private val senderNameColorsLight = listOf(
+    Color(0xFF6750A4), Color(0xFF1565C0), Color(0xFF2E7D32), Color(0xFFB71C1C),
+    Color(0xFFEF6C00), Color(0xFF006064), Color(0xFFAD1457), Color(0xFF4527A0),
+)
+private val senderNameColorsDark = listOf(
+    Color(0xFFCE93D8), Color(0xFF64B5F6), Color(0xFF81C784), Color(0xFFEF9A9A),
+    Color(0xFFFFCC80), Color(0xFF4DD0E1), Color(0xFFF48FB1), Color(0xFFB39DDB),
+)
+
 /**
  * A stable, distinct color for a "virtual" identity — a bridged MeshCore channel author we know
- * only by a declared name (no public key). Keyed on the name so the same author reads the same
- * color, visibly different from our own primary-colored, verified senders.
+ * only by a declared name (no public key). Theme-aware so it reads on both light and dark bubbles.
  */
-fun virtualNameColor(name: String): Color =
-    avatarColors[(name.lowercase().hashCode().ushr(1)) % avatarColors.size]
+@Composable
+fun virtualNameColor(name: String): Color {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val colors = if (dark) senderNameColorsDark else senderNameColorsLight
+    return colors[(name.lowercase().hashCode().ushr(1)) % colors.size]
+}
 
 /**
  * Avatar for a contact/channel. When the identicon style is on AND an [identiconKey] is given
