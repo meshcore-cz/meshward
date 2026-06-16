@@ -145,6 +145,9 @@ fun ExploreScreen(
 
     val showLocationBanner = !promptDismissed && !locationEnabled
     val canSortByDistance = locationEnabled && userLoc != null
+    // The discovered list is TTL-bounded; a plain LazyColumn renders only the visible rows, so we
+    // filter/sort the full list in memory (no Paging) — this avoids the scroll glitches that
+    // constant advert writes would cause by invalidating a PagingSource.
     val shown = remember(discovered, typeFilter, roleFilter, networkFilter, sortByDistance, userLoc, hideSaved, savedContactKeys) {
         var list = discovered
         typeFilter?.let { t -> list = list.filter { it.source == t } }
@@ -309,12 +312,7 @@ fun ExploreScreen(
                     }
                 } else {
                     items(shown, key = { it.pubKeyHex }) { d ->
-                        val distance = userLoc
-                            ?.takeIf { d.hasGps && hasRealLocation(d.lat, d.lon) && hasRealLocation(it.lat, it.lon) }
-                            ?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
-                        val isSaved = d.nodeHex in savedContactKeys || d.pubKeyHex in savedContactKeys
-                        DiscoveredRow(d, distance = distance, isSaved = isSaved) { onOpenProfile(d.nodeHex) }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        DiscoveredRowItem(d, userLoc, savedContactKeys, onOpenProfile)
                     }
                 }
             }
@@ -493,6 +491,22 @@ private fun UnknownNetworkCard(onClick: () -> Unit) {
             )
         }
     }
+}
+
+/** One discovered-contacts row plus its divider, with distance/saved derived from current state. */
+@Composable
+private fun DiscoveredRowItem(
+    d: DiscoveredContact,
+    userLoc: cz.meshcore.meshward.UserLocation?,
+    savedContactKeys: Set<String>,
+    onOpenProfile: (String) -> Unit,
+) {
+    val distance = userLoc
+        ?.takeIf { d.hasGps && hasRealLocation(d.lat, d.lon) && hasRealLocation(it.lat, it.lon) }
+        ?.let { formatDistance(distanceMeters(it, d.lat, d.lon)) }
+    val isSaved = d.nodeHex in savedContactKeys || d.pubKeyHex in savedContactKeys
+    DiscoveredRow(d, distance = distance, isSaved = isSaved) { onOpenProfile(d.nodeHex) }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 }
 
 @Composable

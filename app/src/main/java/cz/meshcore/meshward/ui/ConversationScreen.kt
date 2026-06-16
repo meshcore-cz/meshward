@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -29,8 +28,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Logout
@@ -73,10 +75,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import android.widget.Toast
@@ -121,7 +124,15 @@ fun ConversationScreen(
 ) {
     val isChannel = isChannelPeer(peerHex)
     val isSelf = peerHex == vm.myNodeHex()
-    val messages by remember(peerHex) { vm.messagesFor(peerHex) }.collectAsState()
+    var searching by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    // Paged history (newest-first); searching swaps in a filtered pager. The list is reverse-laid-out
+    // so index 0 (newest) sits at the bottom and older pages load as the user scrolls up.
+    val messageFlow = remember(peerHex, searching, searchQuery) {
+        if (searching && searchQuery.isNotBlank()) vm.searchMessages(peerHex, searchQuery)
+        else vm.messages(peerHex)
+    }
+    val lazyMessages = messageFlow.collectAsLazyPagingItems()
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var detailsFor by remember { mutableStateOf<Message?>(null) }
@@ -132,11 +143,19 @@ fun ConversationScreen(
     // Message whose reaction viewer (who reacted) is open, and the emoji tab to preselect.
     var reactionsFor by remember { mutableStateOf<Message?>(null) }
     var reactionsEmoji by remember { mutableStateOf<String?>(null) }
-    // Hoisted so reacting from the actions sheet can scroll the new reaction into view.
-    val listState = rememberLazyListState()
+    // Scroll position is kept per-conversation in the VM, so reopening a room lands exactly where it
+    // was left (and saves the latest position every time you leave). Seeded from the VM; absent =
+    // bottom (index 0, since the list is reverse-laid-out). Saved on dispose below.
+    val listState = remember(peerHex) {
+        val saved = vm.scrollPositionFor(peerHex)
+        LazyListState(saved?.first ?: 0, saved?.second ?: 0)
+    }
+    DisposableEffect(peerHex, listState) {
+        onDispose {
+            vm.saveScrollPosition(peerHex, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        }
+    }
     val scope = rememberCoroutineScope()
-    var searching by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
     var showEmoji by remember { mutableStateOf(false) }
@@ -145,7 +164,10 @@ fun ConversationScreen(
     // A tapped @mention / declared sender that doesn't match any saved contact.
     var unknownMention by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(peerHex, messages.size) { vm.markRead(peerHex) }
+    // Persisted unread-incoming count for this conversation (drives the jump-to-newest badge and the
+    // Chats-list badge). Messages are marked read only while parked at the bottom (see below), so
+    // ones that arrive while scrolled up stay unread until the user actually scrolls down to them.
+    val unreadCount by remember(peerHex) { vm.unreadCountFor(peerHex) }.collectAsState()
 
     // Whether the remote peer is currently typing (DMs only).
     val typingPeers by vm.typingPeers.collectAsState()
@@ -175,12 +197,9 @@ fun ConversationScreen(
     }
     DisposableEffect(peerHex) { onDispose { vm.stopTyping(peerHex) } }
 
-    // Channel participants (name → node id) learned from the channel's messages; used to
-    // resolve a tapped @mention to a profile, and to power the @-autocomplete.
-    val mentionTargets = remember(messages) {
-        messages.filter { it.senderName.isNotBlank() && it.senderHex.isNotBlank() }
-            .associate { it.senderName to it.senderHex }
-    }
+    // Channel participants (name → node id), sourced from the DB (distinct senders) rather than a
+    // full in-memory message scan; used to resolve a tapped @mention and power the @-autocomplete.
+    val mentionTargets by remember(peerHex) { vm.channelSenders(peerHex) }.collectAsState()
     // Resolve a name to a profile: a saved contact first ("our database"), then a real (native)
     // channel author seen in this room. Unresolved names show a "can't find contact" notice.
     fun resolveName(name: String): String? = contactIndex[name.trim().lowercase()] ?: mentionTargets[name]
@@ -193,11 +212,6 @@ fun ConversationScreen(
     val suggestions = if (mentionQuery != null) {
         mentionTargets.keys.filter { it.contains(mentionQuery, ignoreCase = true) }.sorted().take(6)
     } else emptyList()
-
-    val shown = remember(messages, searching, searchQuery) {
-        if (searching && searchQuery.isNotBlank()) messages.filter { it.text.contains(searchQuery, ignoreCase = true) }
-        else messages
-    }
 
     val shareUri = when {
         isChannel && profile.pskHex.isNotBlank() -> MeshCoreUri.channel(profile.name, profile.pskHex)
@@ -340,73 +354,62 @@ fun ConversationScreen(
             SearchHint("Start typing to search messages…", Modifier.fillMaxSize().padding(padding))
             return@Scaffold
         }
-        // Jump straight to the newest message on first load (no visible scroll-down), then
-        // animate to the bottom only for messages arriving while the chat is open. Skipped
-        // while searching so the filtered view doesn't auto-scroll.
-        // rememberSaveable so these survive navigating to a profile and back; keyed on peerHex
-        // so they reset when opening a different conversation.
-        var positioned by rememberSaveable(peerHex) { mutableStateOf(false) }
-        var stickToBottom by rememberSaveable(peerHex) { mutableStateOf(true) }
-        LaunchedEffect(messages.size) {
-            if (searching || messages.isEmpty()) return@LaunchedEffect
-            // +1 for the header panel item that precedes the messages.
-            if (!positioned) {
-                listState.scrollToItem(messages.size)
-                positioned = true
-            } else if (stickToBottom) {
-                // Only animate to new messages when already pinned at the bottom;
-                // don't yank the user down if they've scrolled up to read history.
-                listState.animateScrollToItem(messages.size)
-            }
-        }
-        // A late ACK_BRIDGED adds the bridge pill to an already-sent message, growing its bubble
-        // without changing the list size. If it's the newest message and we're parked at the bottom,
-        // re-pin it so the taller bubble doesn't slip partly off-screen.
-        LaunchedEffect(shown.lastOrNull()?.bridgedToMeshCore) {
-            if (searching || messages.isEmpty()) return@LaunchedEffect
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            if (lastVisible >= messages.size) listState.animateScrollToItem(messages.size)
-        }
-        // Follow the keyboard: as the IME animates in/out the content area shrinks/grows from the
-        // bottom, so re-pin the newest message to the bottom on every frame of that animation —
-        // but only when the user is parked at the bottom (don't yank them down while reading up).
-        // "Parked at bottom" is re-evaluated only while the keyboard is fully closed, because mid-
-        // animation the shrinking viewport makes canScrollForward true and would disable follow.
-        val density = androidx.compose.ui.platform.LocalDensity.current
-        val imeBottomPx = WindowInsets.ime.getBottom(density)
-        LaunchedEffect(imeBottomPx, listState.canScrollForward) {
-            if (imeBottomPx == 0) stickToBottom = !listState.canScrollForward
-        }
-        LaunchedEffect(imeBottomPx) {
-            if (stickToBottom && !searching && messages.isNotEmpty()) {
-                listState.scrollToItem(messages.size)
-            }
-        }
-        // When the peer starts typing, the "…" bubble is appended below the last message; scroll it
-        // into view — but only if the user was already at the bottom (don't interrupt reading up).
-        LaunchedEffect(peerTyping) {
-            if (peerTyping && !searching) {
-                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-                if (lastVisible >= messages.size) {
-                    listState.animateScrollToItem(messages.size + 1)
+        // reverseLayout pins the newest message (paged index 0) to the bottom and loads older pages
+        // as the user scrolls up. The list state is rememberSaveable, so the scroll position is kept
+        // across navigation (open a profile and come back → same spot). We only auto-scroll to the
+        // bottom when a *new* message arrives AND the user is already parked there — never on open or
+        // return, and never while reading history.
+        // Stick to the bottom when a genuinely NEW message arrives while already parked there.
+        // Crucially this must not run on the initial load, or it would override the restored scroll
+        // position — so we record the first newest id without scrolling and only act on later ones.
+        val newestId = if (lazyMessages.itemCount > 0) lazyMessages.peek(0)?.id else null
+        var lastNewestId by remember(peerHex) { mutableStateOf<String?>(null) }
+        LaunchedEffect(newestId) {
+            if (newestId != null) {
+                // Follow new messages only when already parked at the bottom. Index <= 2 covers the
+                // row shift from inserting our own sent message at index 0.
+                if (lastNewestId != null && lastNewestId != newestId && !searching &&
+                    listState.firstVisibleItemIndex <= 2
+                ) {
+                    listState.animateScrollToItem(0)
                 }
+                lastNewestId = newestId
             }
         }
+        // Show a "jump to newest" button once the newest message is scrolled out of view.
+        val showScrollDown by remember {
+            derivedStateOf { listState.firstVisibleItemIndex > 1 }
+        }
+        // Mark messages read only while parked at the bottom (newest visible). Re-evaluated whenever
+        // the bottom state or the newest message changes, so a reply arriving while you're at the
+        // bottom is marked read at once — and ones arriving while scrolled up stay unread (and show
+        // on the badge) until you scroll down to them.
+        LaunchedEffect(peerHex) {
+            snapshotFlow {
+                (listState.firstVisibleItemIndex <= 1) to
+                    (if (lazyMessages.itemCount > 0) lazyMessages.peek(0)?.id else null)
+            }.collect { (bottom, _) -> if (bottom) vm.markRead(peerHex) }
+        }
+        Box(Modifier.fillMaxSize().padding(padding)) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().padding(padding),
+            modifier = Modifier.fillMaxSize(),
+            reverseLayout = true,
             // Minimal breathing room at the top and bottom of the message list.
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            // A header panel with a big avatar + basic details; also fills the empty space of a
-            // brand-new conversation. Hidden while searching so results aren't pushed down.
-            if (!searching) {
-                item(key = "__header__") {
-                    ConversationHeaderPanel(profile, isChannel, isSelf, onClick = { onOpenProfile?.invoke(peerHex) })
-                }
+            // reverseLayout draws the first DSL item at the BOTTOM, so order is:
+            // typing bubble (bottom) → newest…oldest messages → header panel (top).
+            // Animated "…" bubble where the peer's next message will appear, while they type.
+            if (peerTyping && !searching) {
+                item(key = "__typing__") { TypingBubble() }
             }
-            itemsIndexed(shown, key = { _, m -> m.id }) { i, msg ->
+            items(
+                count = lazyMessages.itemCount,
+                key = lazyMessages.itemKey { it.id },
+            ) { i ->
+                val msg = lazyMessages[i] ?: return@items
                 val sender = if (isChannel) msg.senderName.ifBlank { vm.nameForHex(msg.senderHex) }
                 else vm.nameForHex(msg.senderHex)
                 // Resolve a channel author to a saved/real identity. A bridged ("virtual") author
@@ -425,42 +428,43 @@ fun ConversationScreen(
                         else unknownMention = sender
                     }
                 } else null
-                val prev = shown.getOrNull(i - 1)
-                val next = shown.getOrNull(i + 1)
-                // Sender name on the FIRST message of a consecutive same-sender group.
+                // Newest-first paging: i+1 is the chronologically OLDER neighbor, i-1 the NEWER one.
+                // peek doesn't trigger page loads and throws out of bounds, so guard the list ends;
+                // null = group boundary (or a neighbor page not yet loaded).
+                val older = if (i + 1 < lazyMessages.itemCount) lazyMessages.peek(i + 1) else null
+                val newer = if (i > 0) lazyMessages.peek(i - 1) else null
+                // Sender name on the FIRST (oldest) message of a consecutive same-sender group.
                 val showSenderHeader = when {
                     !isChannel || !msg.incoming -> false
                     searching -> true
-                    prev == null || differentDay(prev.timestampMs, msg.timestampMs) -> true
-                    prev.id.startsWith("mcpath:") -> true
-                    !prev.incoming -> true
-                    msg.timestampMs - prev.timestampMs > 5 * 60_000L -> true
-                    msg.senderHex.isNotBlank() && prev.senderHex.isNotBlank() ->
-                        msg.senderHex != prev.senderHex
-                    else -> msg.senderName.trim() != prev.senderName.trim()
+                    older == null || differentDay(older.timestampMs, msg.timestampMs) -> true
+                    older.id.startsWith("mcpath:") -> true
+                    !older.incoming -> true
+                    msg.timestampMs - older.timestampMs > 5 * 60_000L -> true
+                    msg.senderHex.isNotBlank() && older.senderHex.isNotBlank() ->
+                        msg.senderHex != older.senderHex
+                    else -> msg.senderName.trim() != older.senderName.trim()
                 }
-                // Avatar on the LAST message of a group — next message is different sender or absent.
+                // Avatar on the LAST (newest) message of a group — newer neighbor differs or absent.
                 val showAvatar = when {
                     !isChannel || !msg.incoming -> false
-                    next == null || differentDay(msg.timestampMs, next.timestampMs) -> true
-                    next.id.startsWith("mcpath:") -> true
-                    !next.incoming -> true
-                    next.timestampMs - msg.timestampMs > 5 * 60_000L -> true
-                    msg.senderHex.isNotBlank() && next.senderHex.isNotBlank() ->
-                        msg.senderHex != next.senderHex
-                    else -> msg.senderName.trim() != next.senderName.trim()
+                    newer == null || differentDay(msg.timestampMs, newer.timestampMs) -> true
+                    newer.id.startsWith("mcpath:") -> true
+                    !newer.incoming -> true
+                    newer.timestampMs - msg.timestampMs > 5 * 60_000L -> true
+                    msg.senderHex.isNotBlank() && newer.senderHex.isNotBlank() ->
+                        msg.senderHex != newer.senderHex
+                    else -> msg.senderName.trim() != newer.senderName.trim()
                 }
-                // Collapsed = continuation of same-sender group (no date separator between).
-                // Use minimal gap; the 2dp LazyColumn spacing + 4dp here = 6dp for normal messages.
+                // Collapsed = continuation of same-sender group (no date separator above).
                 val isCollapsed = isChannel && msg.incoming && !showSenderHeader &&
                     !msg.id.startsWith("mcpath:") && !searching
+                // Date separator above the chronological first message of a day (older neighbor is a
+                // different day or absent). Item internals aren't flipped, so it sits above the bubble.
+                val showDateSeparator = !searching &&
+                    (older == null || differentDay(older.timestampMs, msg.timestampMs))
                 Column(Modifier.padding(top = if (isCollapsed) 0.dp else 4.dp)) {
-                    // Date separator whenever the day changes (first message always gets one).
-                    if (!searching) {
-                        if (prev == null || differentDay(prev.timestampMs, msg.timestampMs)) {
-                            DateSeparator(dateLabel(msg.timestampMs))
-                        }
-                    }
+                    if (showDateSeparator) DateSeparator(dateLabel(msg.timestampMs))
                     val repeatCount = floodRepeats[msg.id]?.size ?: 0
                     MessageBubble(
                         msg, isChannel, sender, senderColor, onSenderClick,
@@ -478,10 +482,47 @@ fun ConversationScreen(
                     )
                 }
             }
-            // Animated "…" bubble where the peer's next message will appear, while they type.
-            if (peerTyping && !searching) {
-                item(key = "__typing__") { TypingBubble() }
+            // A header panel with a big avatar + basic details; also fills the empty space of a
+            // brand-new conversation. Last DSL item → renders at the top, above the oldest message.
+            // Suppressed during the initial page load: while messages are streaming in it would be
+            // the only item and reverseLayout's key-anchoring would latch onto it and yank the list
+            // to the top. Shown once messages are loaded, or when the conversation is truly empty.
+            val refreshing = lazyMessages.loadState.refresh is LoadState.Loading
+            if (!searching && (lazyMessages.itemCount > 0 || !refreshing)) {
+                item(key = "__header__") {
+                    ConversationHeaderPanel(profile, isChannel, isSelf, onClick = { onOpenProfile?.invoke(peerHex) })
+                }
             }
+        }
+        // Signal-style jump-to-newest button, bottom-end above the composer.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showScrollDown,
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
+        ) {
+            androidx.compose.material3.BadgedBox(
+                badge = {
+                    if (unreadCount > 0) {
+                        androidx.compose.material3.Badge(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ) { Text("$unreadCount") }
+                    }
+                },
+            ) {
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ) {
+                    Icon(
+                        Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Scroll to newest",
+                    )
+                }
+            }
+        }
         }
     }
 
@@ -496,8 +537,8 @@ fun ConversationScreen(
             onReact = { emoji ->
                 vm.toggleReaction(msg, emoji)
                 actionsFor = null
-                // A new reaction overhangs the bubble bottom — scroll the newest into view.
-                if (shown.lastOrNull()?.id == msg.id) scope.launch { listState.animateScrollToItem(messages.size) }
+                // A new reaction overhangs the bubble bottom — scroll the newest (index 0) into view.
+                if (lazyMessages.peek(0)?.id == msg.id) scope.launch { listState.animateScrollToItem(0) }
             },
             onMoreEmoji = { actionsFor = null; emojiReactFor = msg },
             onCopy = {
@@ -514,7 +555,7 @@ fun ConversationScreen(
             onPick = { emoji ->
                 vm.toggleReaction(msg, emoji)
                 emojiReactFor = null
-                if (shown.lastOrNull()?.id == msg.id) scope.launch { listState.animateScrollToItem(messages.size) }
+                if (lazyMessages.peek(0)?.id == msg.id) scope.launch { listState.animateScrollToItem(0) }
             },
             onDismiss = { emojiReactFor = null },
         )

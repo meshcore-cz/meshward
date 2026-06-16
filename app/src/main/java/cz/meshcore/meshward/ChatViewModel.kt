@@ -68,6 +68,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import androidx.paging.cachedIn
+import cz.meshcore.meshward.data.ConversationRepository
+import cz.meshcore.meshward.data.ChatListRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
@@ -305,6 +308,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val db = ChatDatabase.get(app, identity.dbName)
     private val dao = db.chatDao()
+    private val messageDao = db.messageDao()
+    private val exploreDao = db.exploreDao()
+
+    // Concern-specific repositories over the split DAOs: paged conversation history, the Chats-list
+    // aggregate, and paged/filtered discovered contacts. They own the Paging/aggregate logic so the
+    // UI never loads a whole list into memory.
+    private val conversationRepo = ConversationRepository(messageDao)
+    private val chatListRepo = ChatListRepository(messageDao)
 
     // Per-identity DataStore keys, namespaced by the active identity id (settings don't bleed across
     // profiles). Device-level keys (theme, avatar style, location) stay shared and un-namespaced.
@@ -669,25 +680,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * separately by [chatItems].
      */
     val conversations: StateFlow<List<ConversationSummary>> =
-        combine(dao.allMessages(), contacts, topology, nodeId) { msgs, contacts, topo, me ->
+        combine(chatListRepo.summaries(), contacts, topology, nodeId) { summaries, contacts, topo, me ->
             val byNode = contacts.associateBy { it.nodeHex }
             val meHex = me.toHex()
             // The conversation with our own node is "Note to Self".
             fun titleFor(peer: String) = if (peer == meHex) NOTE_TO_SELF else displayName(peer, byNode, topo)
-            val byPeer = msgs.filter { !isChannelPeer(it.peerHex) }.groupBy { it.peerHex }
-            val messaged = byPeer.map { (peer, list) ->
-                val last = list.maxByOrNull { it.timestampMs }!!
+            // One aggregate row per DM conversation (last message + unread already computed in SQL).
+            val dmRows = summaries.filter { !isChannelPeer(it.peerHex) }
+            val messagedPeers = dmRows.map { it.peerHex }.toSet()
+            val messaged = dmRows.map { row ->
                 ConversationSummary(
-                    peerHex = peer,
-                    title = titleFor(peer),
-                    pubKeyHex = publicKeyHex(peer, byNode, topo),
-                    lastText = last.text,
-                    lastTimestampMs = last.timestampMs,
-                    unread = list.count { it.incoming && !it.read },
+                    peerHex = row.peerHex,
+                    title = titleFor(row.peerHex),
+                    pubKeyHex = publicKeyHex(row.peerHex, byNode, topo),
+                    lastText = row.lastText,
+                    lastTimestampMs = row.lastTimestampMs,
+                    unread = row.unread,
                 )
             }
             // Saved contacts we haven't exchanged messages with yet — shown as empty conversations.
-            val contactOnly = contacts.filter { it.nodeHex !in byPeer.keys }.map { c ->
+            val contactOnly = contacts.filter { it.nodeHex !in messagedPeers }.map { c ->
                 ConversationSummary(
                     peerHex = c.nodeHex,
                     title = titleFor(c.nodeHex),
@@ -702,19 +714,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Channels list (joined channels with their latest message + unread count). */
     val channelConversations: StateFlow<List<ChannelSummary>> =
-        combine(channels, dao.allMessages()) { chans, msgs ->
-            val byPeer = msgs.groupBy { it.peerHex }
+        combine(channels, chatListRepo.summaries()) { chans, summaries ->
+            val byPeer = summaries.associateBy { it.peerHex }
             chans.map { ch ->
-                val list = byPeer[channelPeerId(ch.pskHex)].orEmpty()
-                val last = list.maxByOrNull { it.timestampMs }
+                val row = byPeer[channelPeerId(ch.pskHex)]
                 ChannelSummary(
                     pskHex = ch.pskHex,
                     name = ch.name,
                     kind = ch.kind,
-                    lastSender = last?.senderName ?: "",
-                    lastText = last?.text ?: "",
-                    lastTimestampMs = last?.timestampMs ?: 0L,
-                    unread = list.count { it.incoming && !it.read },
+                    lastSender = row?.lastSender ?: "",
+                    lastText = row?.lastText ?: "",
+                    lastTimestampMs = row?.lastTimestampMs ?: 0L,
+                    unread = row?.unread ?: 0,
                 )
             }.sortedByDescending { it.lastTimestampMs }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -786,7 +797,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * and flagged via [savedContactKeys] so the UI can mark them as already saved.
      */
     val discoveredContacts: StateFlow<List<DiscoveredContact>> =
-        combine(dao.discoveredContacts(), nodeId) { discovered, me ->
+        combine(exploreDao.discoveredContacts(), nodeId) { discovered, me ->
             val meHex = me.toHex()
             val cutoff = System.currentTimeMillis() - DISCOVERED_TTL_MS
             discovered.filter { it.lastAdvertisedMs >= cutoff && it.nodeHex != meHex }
@@ -801,8 +812,33 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             buildSet { list.forEach { add(it.nodeHex); if (it.pubKeyHex.isNotBlank()) add(it.pubKeyHex) } }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
-    fun messagesFor(peerHex: String): StateFlow<List<Message>> =
-        dao.messagesFor(peerHex).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    /** Newest-first paged history for a conversation (the conversation screen reverse-lays it out). */
+    fun messages(peerHex: String): kotlinx.coroutines.flow.Flow<androidx.paging.PagingData<Message>> =
+        conversationRepo.messages(peerHex).cachedIn(viewModelScope)
+
+    /** Paged in-chat search results for [query] within [peerHex]. */
+    fun searchMessages(peerHex: String, query: String): kotlinx.coroutines.flow.Flow<androidx.paging.PagingData<Message>> =
+        conversationRepo.search(peerHex, query).cachedIn(viewModelScope)
+
+    // Per-conversation scroll position (firstVisibleItemIndex, scrollOffset), so a room reopens
+    // exactly where it was last left. Held in the VM (survives navigation for the whole session);
+    // absent = open at the bottom (newest).
+    private val scrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+    fun scrollPositionFor(peerHex: String): Pair<Int, Int>? = scrollPositions[peerHex]
+    fun saveScrollPosition(peerHex: String, index: Int, offset: Int) {
+        scrollPositions[peerHex] = index to offset
+    }
+
+    /** Live unread-incoming count for a conversation (drives the jump-to-newest badge). */
+    fun unreadCountFor(peerHex: String): StateFlow<Int> =
+        conversationRepo.unreadCount(peerHex)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** Channel senders (name → node id) for @-mention autocomplete/resolution, sourced from the DB. */
+    fun channelSenders(peerHex: String): StateFlow<Map<String, String>> =
+        conversationRepo.distinctSenders(peerHex)
+            .map { rows -> rows.associate { it.senderName to it.senderHex } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     fun displayNameFor(peerHex: String): StateFlow<String> =
         combine(contacts, topology) { c, t ->
@@ -936,7 +972,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Drop discovered contacts whose TTL has elapsed so the table doesn't grow unbounded.
         viewModelScope.launch {
-            dao.pruneDiscovered(System.currentTimeMillis() - DISCOVERED_TTL_MS)
+            exploreDao.pruneDiscovered(System.currentTimeMillis() - DISCOVERED_TTL_MS)
         }
     }
 
@@ -1044,7 +1080,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // Android), and a roster can run into the thousands.
                 val existingByPub = incoming.map { it.publicKeyHex }
                     .chunked(900)
-                    .flatMap { dao.discoveredByPubKeys(it) }
+                    .flatMap { exploreDao.discoveredByPubKeys(it) }
                     .associateBy { it.pubKeyHex }
                 val rows = incoming.map { n ->
                     buildDiscoveredRow(
@@ -1066,7 +1102,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // One transaction for the whole batch — collapses thousands of per-node commits into a
                 // single fsync, which is what kept the Room I/O threads pegged during a large sync.
                 db.withTransaction {
-                    dao.upsertDiscoveredAll(rows)
+                    exploreDao.upsertDiscoveredAll(rows)
                     rows.forEach { dao.refreshMeshCoreName(it.nodeHex, it.name) }
                 }
                 nodes.size
@@ -1249,7 +1285,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTrace() { _trace.value = null }
 
     fun clearDiscoveredContacts() {
-        viewModelScope.launch { dao.clearDiscovered() }
+        viewModelScope.launch { exploreDao.clearDiscovered() }
     }
 
     private fun handleTraceResponse(msg: ReceivedMessage) {
@@ -1296,7 +1332,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             contacts.collect { list ->
                 val notFlagged = list.filter { !it.isMeshCore && it.pubKeyHex.length == 64 }
                 if (notFlagged.isEmpty()) return@collect
-                val meshCorePubs = dao.discoveredByPubKeys(notFlagged.map { it.pubKeyHex })
+                val meshCorePubs = exploreDao.discoveredByPubKeys(notFlagged.map { it.pubKeyHex })
                     .filter { it.source == DiscoverySource.MESHCORE }
                     .map { it.pubKeyHex }
                     .toHashSet()
@@ -1360,7 +1396,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             service.dmDeliveries.collect { map ->
                 map.forEach { (idHex, d) ->
                     if (d.failed && !d.acked && processed.add("fail:$idHex")) {
-                        dao.updateDelivery(idHex, MsgStatus.FAILED, "")
+                        messageDao.updateDelivery(idHex, MsgStatus.FAILED, "")
                     }
                 }
             }
@@ -1385,10 +1421,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                         // A heard echo confirms a broadcast channel message propagated; flip it
                         // SENT → DELIVERED (DMs are confirmed by their ACK, not by echoes).
-                        val msg = dao.messageById(idHex)
+                        val msg = messageDao.messageById(idHex)
                         if (msg != null && !msg.incoming && msg.status == MsgStatus.SENT &&
                             cz.meshcore.meshward.data.isChannelPeer(msg.peerHex)) {
-                            dao.updateDelivery(idHex, MsgStatus.DELIVERED, msg.routeHex)
+                            messageDao.updateDelivery(idHex, MsgStatus.DELIVERED, msg.routeHex)
                         }
                     }
                 }
@@ -1509,7 +1545,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 ),
             )
             val hopsText = if (hopCount == 0) "direct" else "$hopCount hop${if (hopCount == 1) "" else "s"}"
-            dao.insertMessage(
+            messageDao.insertMessage(
                 Message(
                     id = key,
                     peerHex = contact.nodeHex,
@@ -1539,7 +1575,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val acked = msg.ackedId ?: return
             val key = "ack:" + acked.toHex()
             if (!processed.add(key)) return
-            dao.updateDeliveryWithAck(
+            messageDao.updateDeliveryWithAck(
                 acked.toHex(), MsgStatus.DELIVERED, msg.path.toRouteHex(),
                 ackPacketHex = msg.raw?.toHex().orEmpty(),
                 ackTimestampMs = msg.timestampMs,
@@ -1551,7 +1587,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         msg.bridgedDatagramId?.let { bridgedId ->
             val idHex = bridgedId.toHex()
             if (!processed.add("bridged:$idHex")) return
-            dao.markBridgedToMeshCore(idHex, msg.bridgedByNodeId?.toHex() ?: "")
+            messageDao.markBridgedToMeshCore(idHex, msg.bridgedByNodeId?.toHex() ?: "")
             return
         }
         if (msg.protocol == PayloadProtocol.SIDEPATH_CONTROL && msg.traceResponse != null) {
@@ -1624,7 +1660,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         // A real message means they're no longer typing — drop the indicator at once.
         clearTyping(peer)
-        dao.insertMessage(
+        messageDao.insertMessage(
             Message(
                 id = id,
                 peerHex = peer,
@@ -1663,7 +1699,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Try every joined channel whose hash matches; the MAC tells us which one decrypts.
         for (ch in dao.channelsByHash(hashByte)) {
             val decoded = ChatChannel.decodePayload(ch.pskHex.hexToBytes(), channelPayload) ?: continue
-            dao.insertMessage(
+            messageDao.insertMessage(
                 Message(
                     id = id,
                     peerHex = channelPeerId(ch.pskHex),
@@ -1722,7 +1758,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // to a MeshCore node would fail). AdvertisedNode has no source, so resolve it from the
             // discovered-contacts table by public key.
             val isMeshCore = existing?.isMeshCore == true ||
-                dao.discoveredByPubKey(node.pubKeyHex)?.source == DiscoverySource.MESHCORE
+                exploreDao.discoveredByPubKey(node.pubKeyHex)?.source == DiscoverySource.MESHCORE
             dao.upsertContact(
                 Contact(node.nodeHex, node.pubKeyHex, node.description,
                     localName = existing?.localName.orEmpty(), isMeshCore = isMeshCore,
@@ -1746,7 +1782,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // If this key is a node we discovered over MeshCore, flag it so messages route over the
             // bridge as a TXT_MSG rather than failing as a native Sidepath DM.
             val isMeshCore = existing?.isMeshCore == true ||
-                dao.discoveredByPubKey(pub)?.source == DiscoverySource.MESHCORE
+                exploreDao.discoveredByPubKey(pub)?.source == DiscoverySource.MESHCORE
             dao.upsertContact(
                 Contact(nodeHex, pub, existing?.description.orEmpty(),
                     localName = alias.ifBlank { existing?.localName.orEmpty() },
@@ -1767,7 +1803,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val existing = dao.contactByNode(peerHex)
             val topo = topology.value.firstOrNull { it.nodeId.toHex() == peerHex }
             val disc = discoveredContacts.value.firstOrNull { it.nodeHex == peerHex }
-                ?: dao.discoveredByPubKey(existing?.pubKeyHex.orEmpty())
+                ?: exploreDao.discoveredByPubKey(existing?.pubKeyHex.orEmpty())
             val pub = existing?.pubKeyHex?.takeIf { it.length == 64 }
                 ?: topo?.publicKey?.takeIf { it.size == 32 }?.toHex()
                 ?: disc?.pubKeyHex?.takeIf { it.length == 64 }
@@ -1787,7 +1823,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Live profile (name, public key, contact state) for the profile page. */
     fun profileFor(peerHex: String): StateFlow<ProfileInfo> =
-        combine(contacts, topology, channels, dao.discoveredContacts()) { c, t, chans, discovered ->
+        combine(contacts, topology, channels, exploreDao.discoveredContacts()) { c, t, chans, discovered ->
             if (isChannelPeer(peerHex)) {
                 val psk = channelPskHexOf(peerHex)
                 val ch = chans.firstOrNull { it.pskHex == psk }
@@ -1893,7 +1929,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             dao.deleteReactionsForPeer(nodeHex)
             dao.deleteEchoesForPeer(nodeHex)
             dao.deleteMeshCoreHeardsForPeer(nodeHex)
-            dao.deleteMessagesFor(nodeHex)
+            messageDao.deleteMessagesFor(nodeHex)
         }
     }
 
@@ -1939,7 +1975,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Note to Self: a local notepad — store the note, never transmit it over the mesh.
         if (peerHex == nodeId.value.toHex()) {
             viewModelScope.launch {
-                dao.insertMessage(
+                messageDao.insertMessage(
                     Message(
                         id = newId(), peerHex = peerHex, senderHex = peerHex, incoming = false,
                         text = body, timestampMs = System.currentTimeMillis(), status = MsgStatus.DELIVERED,
@@ -1964,7 +2000,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     path = pathBytes,
                     pathHashSize = learnedPath?.pathHashSize ?: 0,
                 )
-                dao.insertMessage(
+                messageDao.insertMessage(
                     Message(
                         id = id?.toHex() ?: newId(),
                         peerHex = peerHex,
@@ -1984,7 +2020,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // Resolve the recipient's key from the saved contact (learned from a received DM
             // or the picker), falling back to topology inside the service.
             val id = service.sendChat(body, dst, pub, floodTtl = _floodTtl.value)
-            dao.insertMessage(
+            messageDao.insertMessage(
                 Message(
                     id = id?.toHex() ?: newId(),
                     peerHex = peerHex,
@@ -2009,7 +2045,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // matching what everyone shows for us elsewhere — not the free-form description.
             val myLabel = myName.value.ifBlank { shortHex(nodeId.value.toHex()) }
             val id = service.sendChannel(pskHex.hexToBytes(), myLabel, body, _floodTtl.value)
-            dao.insertMessage(
+            messageDao.insertMessage(
                 Message(
                     id = id.toHex(),
                     peerHex = channelPeerId(pskHex),
@@ -2129,7 +2165,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun markRead(peerHex: String) {
-        viewModelScope.launch { dao.markRead(peerHex) }
+        viewModelScope.launch { messageDao.markRead(peerHex) }
     }
 
     /**
@@ -2141,7 +2177,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             dao.deleteReactionsForPeer(peerHex)
             dao.deleteEchoesForPeer(peerHex)
             dao.deleteMeshCoreHeardsForPeer(peerHex)
-            dao.deleteMessagesFor(peerHex)
+            messageDao.deleteMessagesFor(peerHex)
             if (!isChannelPeer(peerHex)) dao.deleteContact(peerHex)
         }
     }
@@ -2590,9 +2626,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         networkCode: String = "",
         analyzerData: String? = null,
     ) {
-        dao.upsertDiscovered(
+        exploreDao.upsertDiscovered(
             buildDiscoveredRow(
-                existing = dao.discoveredByPubKey(pubKeyHex),
+                existing = exploreDao.discoveredByPubKey(pubKeyHex),
                 pubKeyHex = pubKeyHex,
                 nodeHex = nodeHex,
                 name = name,

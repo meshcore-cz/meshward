@@ -1,6 +1,7 @@
 package cz.meshcore.meshward.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /** A conversation key for a channel is "ch:" + the channel's PSK hex. */
@@ -74,7 +75,7 @@ object DiscoverySource {
  * hear the node advertise. [nodeAdvertisedMs] preserves a MeshCore advert's own timestamp,
  * which can be wrong on repeaters without accurate clocks.
  */
-@Entity(tableName = "discovered_contacts")
+@Entity(tableName = "discovered_contacts", indices = [Index("lastAdvertisedMs")])
 data class DiscoveredContact(
     @PrimaryKey val pubKeyHex: String,
     val nodeHex: String,        // Sidepath NodeId hex (pubkey[:10]); derived for MeshCore too
@@ -223,7 +224,7 @@ data class Contact(
  * [routeHex] is a comma-separated hop path (the trace the packet took, or for a
  * delivered DM the route the ACK returned along).
  */
-@Entity(tableName = "messages")
+@Entity(tableName = "messages", indices = [Index(value = ["peerHex", "timestampMs"])])
 data class Message(
     @PrimaryKey val id: String,
     val peerHex: String,

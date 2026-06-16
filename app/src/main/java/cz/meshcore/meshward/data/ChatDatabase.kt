@@ -11,11 +11,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
     entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, MeshCorePath::class, NodeAnnouncement::class, MeshNetwork::class],
-    version = 22,
+    version = 23,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
+    abstract fun messageDao(): MessageDao
+    abstract fun exploreDao(): ExploreDao
 
     companion object {
         // One open instance per database file — each identity (profile) has its own file, so the
@@ -199,12 +201,22 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v22→v23: add indexes backing Paging 3 (messages page by peerHex+timestampMs; discovered
+        // contacts order by lastAdvertisedMs). Index names must match Room's generated scheme so the
+        // post-migration schema validation passes. Additive — migrate in place.
+        private val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_peerHex_timestampMs` ON `messages` (`peerHex`, `timestampMs`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_discovered_contacts_lastAdvertisedMs` ON `discovered_contacts` (`lastAdvertisedMs`)")
+            }
+        }
+
         fun get(context: Context, dbName: String = "meshward.db"): ChatDatabase = synchronized(this) {
             instances[dbName] ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 dbName,
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23)
                 .fallbackToDestructiveMigration()
                 .build().also { instances[dbName] = it }
         }

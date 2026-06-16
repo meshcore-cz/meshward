@@ -8,43 +8,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ChatDao {
-    // ---- messages ----
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertMessage(msg: Message): Long
-
-    @Query("SELECT * FROM messages ORDER BY timestampMs ASC")
-    fun allMessages(): Flow<List<Message>>
-
-    @Query("SELECT * FROM messages WHERE peerHex = :peer ORDER BY timestampMs ASC")
-    fun messagesFor(peer: String): Flow<List<Message>>
-
-    @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
-    suspend fun messageById(id: String): Message?
-
-    @Query("UPDATE messages SET status = :status, routeHex = :route WHERE id = :id")
-    suspend fun updateDelivery(id: String, status: Int, route: String)
-
-    /** Mark a DM delivered and persist the ACK packet + receipt time for the round-trip detail. */
-    @Query(
-        "UPDATE messages SET status = :status, routeHex = :route, " +
-            "ackPacketHex = :ackPacketHex, ackTimestampMs = :ackTimestampMs WHERE id = :id"
-    )
-    suspend fun updateDeliveryWithAck(
-        id: String,
-        status: Int,
-        route: String,
-        ackPacketHex: String,
-        ackTimestampMs: Long,
-    )
-
-    @Query("UPDATE messages SET bridgedToMeshCore = 1, bridgedByHex = :bridgeHex WHERE id = :id")
-    suspend fun markBridgedToMeshCore(id: String, bridgeHex: String)
-
-    @Query("UPDATE messages SET read = 1 WHERE peerHex = :peer AND incoming = 1 AND read = 0")
-    suspend fun markRead(peer: String)
-
-    @Query("DELETE FROM messages WHERE peerHex = :peer")
-    suspend fun deleteMessagesFor(peer: String)
+    // Messages live in MessageDao; discovered contacts in ExploreDao.
 
     // ---- contacts ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -150,34 +114,6 @@ interface ChatDao {
 
     @Query("DELETE FROM mesh_networks WHERE code = :code")
     suspend fun deleteNetwork(code: String)
-
-    // ---- discovered contacts ----
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertDiscovered(contact: DiscoveredContact)
-
-    /** Bulk upsert — used by the analyzer roster sync to write the whole batch in one transaction. */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertDiscoveredAll(contacts: List<DiscoveredContact>)
-
-    @Query("SELECT * FROM discovered_contacts ORDER BY lastAdvertisedMs DESC")
-    fun discoveredContacts(): Flow<List<DiscoveredContact>>
-
-    @Query("SELECT * FROM discovered_contacts WHERE pubKeyHex = :pubKeyHex LIMIT 1")
-    suspend fun discoveredByPubKey(pubKeyHex: String): DiscoveredContact?
-
-    /** Batch lookup of existing rows by public key, so a bulk sync can resolve them in one query. */
-    @Query("SELECT * FROM discovered_contacts WHERE pubKeyHex IN (:pubKeyHexes)")
-    suspend fun discoveredByPubKeys(pubKeyHexes: List<String>): List<DiscoveredContact>
-
-    @Query("DELETE FROM discovered_contacts WHERE pubKeyHex = :pubKeyHex")
-    suspend fun deleteDiscovered(pubKeyHex: String)
-
-    @Query("DELETE FROM discovered_contacts")
-    suspend fun clearDiscovered()
-
-    /** Drops discovered contacts not heard from since [cutoffMs] (their TTL has elapsed). */
-    @Query("DELETE FROM discovered_contacts WHERE lastAdvertisedMs < :cutoffMs")
-    suspend fun pruneDiscovered(cutoffMs: Long)
 
     // ---- node announcements (latest ANNOUNCE/ADVERT per node, persisted for the profile) ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
