@@ -119,9 +119,15 @@ class ChatActivity : ComponentActivity() {
         handleDeepLink(intent)
     }
 
-    /** Routes a `meshcore://` VIEW intent (contact/channel share link) into the view model. */
+    /**
+     * Routes an inbound intent: a `meshcore://` VIEW share link (contact/channel), or a chat
+     * notification tap carrying [MeshwardNotifier.EXTRA_OPEN_PEER] (open that conversation).
+     */
     private fun handleDeepLink(intent: Intent?) {
-        val data = intent?.data ?: return
+        if (intent == null) return
+        intent.getStringExtra(cz.meshcore.meshward.notify.MeshwardNotifier.EXTRA_OPEN_PEER)
+            ?.let { viewModel.requestOpenPeer(it); return }
+        val data = intent.data ?: return
         if (data.scheme == "meshcore") viewModel.handleSharedUri(data.toString())
     }
 

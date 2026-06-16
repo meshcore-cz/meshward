@@ -14,10 +14,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -35,6 +38,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +59,7 @@ import cz.meshcore.meshward.ChatListItem
 import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.MeshCoreUri
 import cz.meshcore.meshward.data.ChannelKind
+import cz.meshcore.meshward.data.NotifMode
 import cz.meshcore.meshward.nameFromPubKey
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -148,15 +153,28 @@ fun ChatsScreen(
                 )
             items.isEmpty() ->
                 EmptyState(Modifier.fillMaxSize().padding(padding), searching = false)
-            else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                items(items, key = { it.peerHex }) { item ->
-                    ChatRow(
-                        item,
-                        isSelf = item.peerHex == myNode.toHex(),
-                        nowMs = nowMs,
-                        onClick = { onOpenConversation(item.peerHex) },
-                        onAvatarClick = { onOpenProfile(item.peerHex) },
-                    )
+            else -> {
+                val listState = rememberLazyListState()
+                // When a conversation jumps to the top (new message → re-sorted), the keyed list stays
+                // anchored to the previous first row, leaving the freshly-promoted one just above the
+                // viewport. If the user is already at/near the top, follow it up so the new message is
+                // seen; if they've scrolled down to read older chats, leave them where they are.
+                val topPeer = items.firstOrNull()?.peerHex
+                LaunchedEffect(topPeer) {
+                    if (topPeer != null && listState.firstVisibleItemIndex <= 1) {
+                        listState.animateScrollToItem(0)
+                    }
+                }
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(padding)) {
+                    items(items, key = { it.peerHex }) { item ->
+                        ChatRow(
+                            item,
+                            isSelf = item.peerHex == myNode.toHex(),
+                            nowMs = nowMs,
+                            onClick = { onOpenConversation(item.peerHex) },
+                            onAvatarClick = { onOpenProfile(item.peerHex) },
+                        )
+                    }
                 }
             }
         }
@@ -243,6 +261,21 @@ internal fun ChatRow(
                         modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                when (item.notifMode) {
+                    NotifMode.NONE -> Icon(
+                        Icons.Default.NotificationsOff,
+                        contentDescription = "Muted",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    NotifMode.MENTIONS -> Icon(
+                        Icons.Default.AlternateEmail,
+                        contentDescription = "Mentions only",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    NotifMode.ALL -> {}
                 }
             }
             if (!item.isChannel && !isSelf) {

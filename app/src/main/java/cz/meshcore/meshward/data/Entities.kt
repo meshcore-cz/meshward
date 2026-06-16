@@ -187,6 +187,29 @@ data class MeshCorePath(
     val contentId: String = "",
 )
 
+/**
+ * Per-conversation notification preference, persisted by [peerHex] so it covers both direct chats
+ * (the peer's node id) and channels ("ch:"+pskHex). Absence of a row means [NotifMode.ALL] (the
+ * default for everything); the only seeded exception is the auto-joined Public channel, which is
+ * created as [NotifMode.MENTIONS] so a fresh install isn't buzzed by every public message.
+ */
+@Entity(tableName = "conversation_prefs")
+data class ConversationPref(
+    @PrimaryKey val peerHex: String,
+    val notifMode: Int = NotifMode.ALL.value,
+)
+
+/** How loudly a conversation notifies. Stored as [value] in [ConversationPref.notifMode]. */
+enum class NotifMode(val value: Int) {
+    ALL(0),       // every incoming message notifies
+    MENTIONS(1),  // only messages that @-mention us
+    NONE(2);      // muted — never notifies
+
+    companion object {
+        fun fromValue(v: Int?): NotifMode = entries.firstOrNull { it.value == v } ?: ALL
+    }
+}
+
 /** Outgoing-message delivery state. */
 object MsgStatus {
     const val SENDING = 0

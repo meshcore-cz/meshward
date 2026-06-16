@@ -38,7 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import cz.meshcore.meshward.ChatViewModel
-import cz.meshcore.sidepath.service.MessageNotifier
+import cz.meshcore.meshward.notify.MeshwardNotifier
 
 /**
  * Navigation destinations, ordered by [depth] (how deep in the push stack they are). The
@@ -139,7 +139,7 @@ fun ChatRoot(vm: ChatViewModel) {
     val lifecycleOwner = LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycleOwner, activeConversationPeer) {
         fun syncActiveConversation() {
-            MessageNotifier.setActiveConversation(
+            MeshwardNotifier.setActiveConversation(
                 activeConversationPeer
                     ?.takeIf { lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) }
             )
@@ -150,7 +150,7 @@ fun ChatRoot(vm: ChatViewModel) {
         syncActiveConversation()
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            MessageNotifier.setActiveConversation(null)
+            MeshwardNotifier.setActiveConversation(null)
         }
     }
 

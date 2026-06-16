@@ -26,12 +26,14 @@ import cz.meshcore.meshward.data.Channel
 import cz.meshcore.meshward.data.ChannelKind
 import cz.meshcore.meshward.data.ChatDatabase
 import cz.meshcore.meshward.data.Contact
+import cz.meshcore.meshward.data.ConversationPref
 import cz.meshcore.meshward.data.DiscoveredContact
 import cz.meshcore.meshward.data.DiscoverySource
 import cz.meshcore.meshward.data.MeshCorePath
 import cz.meshcore.meshward.data.MeshNetwork
 import cz.meshcore.meshward.data.Message
 import cz.meshcore.meshward.data.MsgStatus
+import cz.meshcore.meshward.data.NotifMode
 import cz.meshcore.meshward.data.Reaction
 import cz.meshcore.meshward.data.channelPeerId
 import cz.meshcore.meshward.data.channelPskHexOf
@@ -71,6 +73,8 @@ import kotlinx.coroutines.flow.map
 import androidx.paging.cachedIn
 import cz.meshcore.meshward.data.ConversationRepository
 import cz.meshcore.meshward.data.ChatListRepository
+import cz.meshcore.meshward.notify.AvatarBitmap
+import cz.meshcore.meshward.notify.MeshwardNotifier
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
@@ -78,7 +82,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.security.SecureRandom
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "meshward_prefs")
+// internal so the headless notifier (cz.meshcore.meshward.notify) can read the same single DataStore
+// instance — a DataStore name may only be instantiated once per process.
+internal val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "meshward_prefs")
 private val SEED_KEY = stringPreferencesKey("seed")
 private val DESC_KEY = stringPreferencesKey("description")
 private val NAME_KEY = stringPreferencesKey("name")
@@ -88,7 +94,7 @@ private const val DEFAULT_DM_RETRY_DELAY_MS = 3000
 private const val DEFAULT_DM_MAX_TRIES = 3
 private val FLOOD_TTL_KEY = intPreferencesKey("flood_ttl")
 private val PHY_MODE_KEY = stringPreferencesKey("phy_mode")
-private val AVATAR_STYLE_KEY = stringPreferencesKey("avatar_style")
+internal val AVATAR_STYLE_KEY = stringPreferencesKey("avatar_style")
 private val THEME_KEY = stringPreferencesKey("theme_mode")
 private val ANALYZER_URLS_KEY = stringPreferencesKey("analyzer_urls") // newline-separated base URLs
 // Location is opt-in and only used locally to compute distances to nodes that advertise GPS.
@@ -263,6 +269,7 @@ data class ChatListItem(
     val unread: Int,
     val pubKeyHex: String = "", // DM identicon key
     val channelKind: String = "",
+    val notifMode: NotifMode = NotifMode.ALL, // drives the muted/mentions indicator
 )
 
 /** A row in the Channels list. */
@@ -653,6 +660,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val channels: StateFlow<List<Channel>> =
         dao.channels().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /**
+     * Per-conversation notification mode, keyed by peerHex. A peer with no stored pref defaults to
+     * [NotifMode.ALL]; the auto-joined Public channel is seeded to [NotifMode.MENTIONS] (see
+     * [ensurePublicChannel]). Drives both the notify decision and the muted-bell UI in the chat list.
+     */
+    val notifModes: StateFlow<Map<String, NotifMode>> =
+        dao.prefs().map { list -> list.associate { it.peerHex to NotifMode.fromValue(it.notifMode) } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** The notification mode for one conversation (defaults to ALL when unset). */
+    fun notifModeFor(peerHex: String): NotifMode = notifModes.value[peerHex] ?: NotifMode.ALL
+
+    /** Sets (or clears, when ALL) a conversation's notification mode. */
+    fun setNotifMode(peerHex: String, mode: NotifMode) {
+        viewModelScope.launch {
+            if (mode == NotifMode.ALL) dao.deletePref(peerHex)
+            else dao.upsertPref(ConversationPref(peerHex, mode.value))
+        }
+    }
+
     /** Emoji reactions grouped by the message id they target, for the conversation UI. */
     val reactions: StateFlow<Map<String, List<Reaction>>> =
         dao.allReactions().map { it.groupBy { r -> r.messageId } }
@@ -732,19 +759,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Merged Chats list: direct conversations and channels, intermixed by recency. */
     val chatItems: StateFlow<List<ChatListItem>> =
-        combine(conversations, channelConversations) { dms, chans ->
+        combine(conversations, channelConversations, notifModes) { dms, chans, modes ->
             val dmItems = dms.map {
                 ChatListItem(
                     peerHex = it.peerHex, isChannel = false, title = it.title,
                     lastText = it.lastText, lastSender = "", lastTimestampMs = it.lastTimestampMs,
                     unread = it.unread, pubKeyHex = it.pubKeyHex,
+                    notifMode = modes[it.peerHex] ?: NotifMode.ALL,
                 )
             }
             val chanItems = chans.map {
+                val peer = channelPeerId(it.pskHex)
                 ChatListItem(
-                    peerHex = channelPeerId(it.pskHex), isChannel = true, title = it.name,
+                    peerHex = peer, isChannel = true, title = it.name,
                     lastText = it.lastText, lastSender = it.lastSender,
                     lastTimestampMs = it.lastTimestampMs, unread = it.unread, channelKind = it.kind,
+                    notifMode = modes[peer] ?: NotifMode.ALL,
                 )
             }
             (dmItems + chanItems).sortedByDescending { it.lastTimestampMs }
@@ -948,10 +978,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     kind = ChannelKind.PUBLIC,
                 )
             )
+            // The everyone-channel is busy by default, so a fresh install joins it muted-to-mentions
+            // rather than buzzing on every public message. Only seeded on first creation, so a user
+            // who later changes it (or had it before this feature) keeps their own choice.
+            val publicPeer = channelPeerId(pskHex)
+            if (dao.prefFor(publicPeer) == null) {
+                dao.upsertPref(ConversationPref(publicPeer, NotifMode.MENTIONS.value))
+            }
         }
     }
 
+    // Wall-clock of when this ViewModel started ingesting. Messages older than this are ones the
+    // service buffered while the UI was dead (drained on reopen) — the headless fallback already
+    // notified them, so [maybeNotify] skips them to avoid a re-notify storm when the app reopens.
+    private val ingestStartMs = System.currentTimeMillis()
+
     init {
+        // The rich, foreground notification path is this ViewModel; tell the headless fallback to
+        // stand down while we're alive (re-armed in onCleared when the UI goes away).
+        MeshwardNotifier.uiAlive = true
         // Load display preferences early so the theme/avatars are right before the service binds.
         viewModelScope.launch {
             migrateLegacyPrefsIfNeeded()
@@ -1685,6 +1730,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // The service verified the sender (MeshCore MAC, or outer.source == sender_public_key[:10] for
         // native DMs); save the sender's key so we can reply even if it's not (yet) in our topology.
         learnContact(peer, msg.senderPublicKey, isMeshCore = msg.fromMeshCore)
+        maybeNotify(
+            peerHex = peer,
+            isChannel = false,
+            conversationTitle = "",
+            senderName = nameForHex(peer),
+            senderHex = peer,
+            senderPubKeyHex = pubKeyForHex(peer),
+            text = msg.text ?: "",
+            timeMs = msg.timestampMs,
+        )
     }
 
     private suspend fun handleIncomingChannel(msg: ReceivedMessage) {
@@ -1728,8 +1783,79 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     rssi = msg.rssi,
                 )
             )
+            val author = decoded.senderLabel
+            // A native author carries the originating node id (→ identicon); a bridged author is
+            // name-only, so resolve a saved contact by name to recover an avatar key when we can.
+            val authorHex = if (msg.fromMeshCore) nodeHexForName(author).orEmpty() else msg.fromNodeId.toHex()
+            maybeNotify(
+                peerHex = channelPeerId(ch.pskHex),
+                isChannel = true,
+                conversationTitle = ch.name,
+                senderName = author,
+                senderHex = authorHex,
+                senderPubKeyHex = authorHex.takeIf { it.isNotBlank() }?.let { pubKeyForHex(it) }.orEmpty(),
+                text = decoded.text,
+                timeMs = msg.timestampMs,
+            )
             return
         }
+    }
+
+    /**
+     * Posts a chat notification for a freshly-received incoming message, honouring the conversation's
+     * [NotifMode] and skipping the conversation the user is currently looking at. All display data
+     * (rename-aware name, avatar) is resolved here so the notification matches the in-app rendering.
+     */
+    private fun maybeNotify(
+        peerHex: String,
+        isChannel: Boolean,
+        conversationTitle: String,
+        senderName: String,
+        senderHex: String,
+        senderPubKeyHex: String,
+        text: String,
+        timeMs: Long,
+    ) {
+        if (text.isBlank()) return
+        // Skip messages the service buffered while the UI was dead: the headless fallback already
+        // notified them, and they're only being replayed now because this fresh ViewModel is draining
+        // the service buffer on reopen. Real-time messages have timestamp >= ingestStartMs.
+        if (timeMs in 1 until ingestStartMs) return
+        // Don't buzz for the chat that's open on screen — it's marked read as messages arrive.
+        if (MeshwardNotifier.isConversationActive(peerHex)) return
+        when (notifModeFor(peerHex)) {
+            NotifMode.NONE -> return
+            // Channels only notify when we're @-mentioned; a DM is always "addressed to me".
+            NotifMode.MENTIONS -> if (isChannel && !mentionsMe(text)) return
+            NotifMode.ALL -> {}
+        }
+        val name = senderName.ifBlank { "Someone" }
+        val avatar = AvatarBitmap.get(
+            style = _avatarStyle.value,
+            seed = senderHex.ifBlank { name },
+            label = name,
+            identiconKey = senderPubKeyHex.takeIf { it.length == 64 },
+            dark = AvatarBitmap.isSystemDark(getApplication()),
+        )
+        MeshwardNotifier.notifyMessage(
+            context = getApplication(),
+            peerHex = peerHex,
+            conversationTitle = conversationTitle,
+            isGroup = isChannel,
+            senderName = name,
+            senderKey = senderHex.ifBlank { name },
+            senderAvatar = avatar,
+            text = text,
+            timeMs = if (timeMs > 0) timeMs else System.currentTimeMillis(),
+            selfName = myName.value,
+        )
+    }
+
+    /** True if [text] @-mentions our display name (case-insensitive). */
+    private fun mentionsMe(text: String): Boolean {
+        val me = myName.value.trim()
+        if (me.isBlank()) return false
+        return text.contains("@$me", ignoreCase = true)
     }
 
     /** Saves/updates a contact's public key. Prefers an explicit key, else the topology key. */
@@ -2123,6 +2249,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumePendingOpen() { _pendingOpenPeer.value = null }
 
+    /** Asks the UI to open [peerHex] (e.g. when a chat notification is tapped). */
+    fun requestOpenPeer(peerHex: String) { _pendingOpenPeer.value = peerHex }
+
     /**
      * Handles a scanned/clicked `meshcore://` link: joins the channel or adds the contact, then
      * asks the UI to open it. Returns true if the URI was a recognised MeshCore link.
@@ -2166,6 +2295,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun markRead(peerHex: String) {
         viewModelScope.launch { messageDao.markRead(peerHex) }
+        // Reading a conversation (open + parked at the bottom) clears its notification.
+        MeshwardNotifier.cancel(getApplication(), peerHex)
     }
 
     /**
@@ -2406,6 +2537,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        // The UI is going away — hand notification duty back to the headless fallback so messages that
+        // arrive while the app is task-killed still notify (the foreground service keeps running).
+        MeshwardNotifier.uiAlive = false
         if (serviceBound) {
             runCatching { getApplication<Application>().unbindService(serviceConnection) }
             serviceBound = false

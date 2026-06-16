@@ -41,10 +41,14 @@ import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
@@ -181,6 +185,9 @@ fun ConversationScreen(
     val contactIndex by vm.contactNameIndex.collectAsState()
     // Emoji reactions, grouped by target message id.
     val reactionsByMsg by vm.reactions.collectAsState()
+    // This conversation's notification mode (drives the three-dot Notifications submenu).
+    val notifModes by vm.notifModes.collectAsState()
+    val notifMode = notifModes[peerHex] ?: cz.meshcore.meshward.data.NotifMode.ALL
     // The network this channel is currently bridged on — shown on the MeshCore chips in place of the
     // generic "MeshCore" label. Blank when no network is active (falls back to "MeshCore").
     val activeNetwork by vm.activeNetwork.collectAsState()
@@ -249,7 +256,30 @@ fun ConversationScreen(
                             }
                             Spacer(Modifier.width(10.dp))
                             Column {
-                                Text(if (isSelf) NOTE_TO_SELF else profile.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(if (isSelf) NOTE_TO_SELF else profile.name, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    when (notifMode) {
+                                        cz.meshcore.meshward.data.NotifMode.NONE -> {
+                                            Spacer(Modifier.width(6.dp))
+                                            Icon(
+                                                Icons.Default.NotificationsOff,
+                                                contentDescription = "Muted",
+                                                modifier = Modifier.size(16.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        cz.meshcore.meshward.data.NotifMode.MENTIONS -> {
+                                            Spacer(Modifier.width(6.dp))
+                                            Icon(
+                                                Icons.Default.AlternateEmail,
+                                                contentDescription = "Mentions only",
+                                                modifier = Modifier.size(16.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        cz.meshcore.meshward.data.NotifMode.ALL -> {}
+                                    }
+                                }
                                 val showKey = !isSelf && !isChannel && !peerTyping && profile.pubKeyHex.isNotBlank()
                                 val subtitle = when {
                                     isSelf -> "Only you can see these"
@@ -296,6 +326,35 @@ fun ConversationScreen(
                                 onClick = { menuOpen = false; showShare = true },
                             )
                         }
+                        HorizontalDivider()
+                        // Per-conversation notifications: All / Mentions only / None. The active mode
+                        // is check-marked; choosing one persists it and updates the chat-list bell.
+                        Text(
+                            "Notifications",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp),
+                        )
+                        NotifModeItem(
+                            label = "All messages",
+                            icon = Icons.Default.Notifications,
+                            selected = notifMode == cz.meshcore.meshward.data.NotifMode.ALL,
+                        ) { menuOpen = false; vm.setNotifMode(peerHex, cz.meshcore.meshward.data.NotifMode.ALL) }
+                        // "Mentions only" is meaningful only for channels — a DM is always addressed
+                        // to you, so it would behave identically to "All".
+                        if (isChannel) {
+                            NotifModeItem(
+                                label = "Mentions only",
+                                icon = Icons.Default.AlternateEmail,
+                                selected = notifMode == cz.meshcore.meshward.data.NotifMode.MENTIONS,
+                            ) { menuOpen = false; vm.setNotifMode(peerHex, cz.meshcore.meshward.data.NotifMode.MENTIONS) }
+                        }
+                        NotifModeItem(
+                            label = "None (muted)",
+                            icon = Icons.Default.NotificationsOff,
+                            selected = notifMode == cz.meshcore.meshward.data.NotifMode.NONE,
+                        ) { menuOpen = false; vm.setNotifMode(peerHex, cz.meshcore.meshward.data.NotifMode.NONE) }
+                        HorizontalDivider()
                         if (isChannel) {
                             DropdownMenuItem(
                                 text = { Text("Leave channel") },
@@ -1212,6 +1271,24 @@ private fun ConversationHeaderPanel(profile: ProfileInfo, isChannel: Boolean, is
             }
         }
     }
+}
+
+/** One row of the three-dot Notifications submenu — its [icon]/[label] with a trailing check when [selected]. */
+@Composable
+private fun NotifModeItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        leadingIcon = { Icon(icon, contentDescription = null) },
+        trailingIcon = {
+            if (selected) Icon(Icons.Default.Check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary)
+        },
+        onClick = onClick,
+    )
 }
 
 /** The active mention query: the partial after a trailing "@" (word-boundary), or null. */

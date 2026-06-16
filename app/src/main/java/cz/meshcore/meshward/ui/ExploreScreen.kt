@@ -371,7 +371,11 @@ private fun AnalyzerSyncButton(syncing: Boolean, onClick: () -> Unit) {
 @Composable
 private fun LiveDot(pulseKey: Any?, modifier: Modifier = Modifier) {
     val alpha = remember { Animatable(0.3f) }
+    // Skip the flash on the first composition (i.e. arriving on the page) — only a genuinely new
+    // packet (a later change of pulseKey) should pulse the dot.
+    var armed by remember { mutableStateOf(false) }
     LaunchedEffect(pulseKey) {
+        if (!armed) { armed = true; return@LaunchedEffect }
         alpha.snapTo(1f)
         alpha.animateTo(0.3f, animationSpec = tween(durationMillis = 1000))
     }
@@ -432,7 +436,7 @@ private fun ActiveNetworkCard(
                     val detection = if (autoDetected) "auto-detected" else "manual"
                     val bridges = if (bridgeCount > 0) " · $bridgeCount ${if (bridgeCount == 1) "bridge" else "bridges"}" else ""
                     Text(
-                        "MeshCore network · $detection$bridges",
+                        "MeshCore · $detection$bridges",
                         style = MaterialTheme.typography.bodySmall,
                         color = subtle,
                         maxLines = 1,

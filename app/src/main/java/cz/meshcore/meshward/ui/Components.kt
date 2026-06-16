@@ -367,7 +367,9 @@ fun formatRelative(ts: Long, now: Long = System.currentTimeMillis()): String {
  */
 fun formatRelativeAge(ts: Long, now: Long = System.currentTimeMillis()): String {
     val diff = now - ts
-    return if (diff in 0 until 3_600_000) formatMessageTime(ts, now) else formatRelative(ts, now)
+    // diff < 0 means the timestamp is in the future (clock skew between mesh nodes) — keep it in the
+    // relative path so it reads as "now" rather than dropping to an absolute clock time.
+    return if (diff < 3_600_000) formatMessageTime(ts, now) else formatRelative(ts, now)
 }
 
 /**
@@ -377,7 +379,7 @@ fun formatRelativeAge(ts: Long, now: Long = System.currentTimeMillis()): String 
 fun formatMessageTime(ts: Long, now: Long = System.currentTimeMillis()): String {
     val diff = now - ts
     return when {
-        diff < 0 -> timeFmt.format(Date(ts))
+        // Future or <5s old (incl. small clock skew that puts a packet slightly ahead) → "now".
         diff < 5_000 -> "now"
         diff < 60_000 -> "${diff / 1000}s ago"
         diff < 3_600_000 -> "${diff / 60_000}m ago"

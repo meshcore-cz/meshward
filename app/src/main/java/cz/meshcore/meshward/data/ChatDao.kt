@@ -58,6 +58,19 @@ interface ChatDao {
     @Query("DELETE FROM channels WHERE pskHex = :pskHex")
     suspend fun deleteChannel(pskHex: String)
 
+    // ---- conversation notification prefs ----
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPref(pref: ConversationPref)
+
+    @Query("SELECT * FROM conversation_prefs")
+    fun prefs(): Flow<List<ConversationPref>>
+
+    @Query("SELECT * FROM conversation_prefs WHERE peerHex = :peerHex LIMIT 1")
+    suspend fun prefFor(peerHex: String): ConversationPref?
+
+    @Query("DELETE FROM conversation_prefs WHERE peerHex = :peerHex")
+    suspend fun deletePref(peerHex: String)
+
     // ---- reactions ----
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReaction(reaction: Reaction)
