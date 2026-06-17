@@ -332,6 +332,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val nsFloodTtl = intPreferencesKey("${identity.id}_flood_ttl")
     private val nsPhy = stringPreferencesKey("${identity.id}_phy_mode")
     private val nsAnalyzer = stringPreferencesKey("${identity.id}_analyzer_urls")
+    private val nsMeshCore = booleanPreferencesKey("${identity.id}_meshcore_enabled")
 
     /** One-shot signal to the Activity to relaunch the app (after an identity switch / seed change). */
     private val _relaunch = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -410,6 +411,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // authoritative source of the app's active network — see [activeNetwork].
     val companionManager = CompanionManager(app, viewModelScope)
     val companions: StateFlow<List<CompanionState>> = companionManager.companions
+
+    /**
+     * Master MeshCore switch (persisted per identity, default on). When off the device is a plain
+     * Sidepath node: MeshCore packets aren't decoded/bridged, no [activeNetwork], companions stop
+     * bridging. The service and companion manager mirror this flag.
+     */
+    private val _meshCoreEnabled = MutableStateFlow(true)
+    val meshCoreEnabled: StateFlow<Boolean> = _meshCoreEnabled.asStateFlow()
 
     // ---- MeshCore Networks (auto-detected from bridge announces) --------------
     // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
@@ -527,8 +536,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * nothing is detected and no companion defines one — callers (Explore) hide the network card then.
      */
     val activeNetwork: StateFlow<MeshNetwork?> =
-        combine(networks, detectedNetworks, companions, isRunning) { all, detected, comps, running ->
-            if (!running) return@combine null
+        combine(networks, detectedNetworks, companions, isRunning, _meshCoreEnabled) { all, detected, comps, running, mcOn ->
+            if (!running || !mcOn) return@combine null
             val compCode = comps.firstOrNull {
                 it.config.radioMode == CompanionRadioMode.AUTO && it.config.bridgeEnabled &&
                     it.link == CompanionLinkState.READY && it.config.radioNetworkCode.isNotBlank()
@@ -656,6 +665,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Starts/stops the mesh radio (advertise + scan + GATT). Surfaced on the Network page. */
     fun startMesh() { _service.value?.startBLE() }
     fun stopMesh() { _service.value?.stopBLE() }
+
+    /** Master MeshCore on/off: persisted, mirrored to the service and the companion manager. */
+    fun setMeshCoreEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { it[nsMeshCore] = enabled }
+            _meshCoreEnabled.value = enabled
+            _service.value?.meshCoreEnabled = enabled
+            companionManager.setMeshCoreEnabled(enabled)
+        }
+    }
 
     /** Overall connection health, surfaced as the status dot in the Chats header. */
     val connectionStatus: StateFlow<ConnState> =
@@ -995,6 +1014,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _analyzerUrls.value = parseAnalyzerUrls(pref[nsAnalyzer])
 
         val node = Identity.fromSeed(seedHex.hexToBytes())
+        service.meshCoreEnabled = pref[nsMeshCore] ?: true
         service.initialize(node, phy, emptySet(), desc, nodeName, retryDelay.toLong(), maxTries)
         ensurePublicChannel()
     }
@@ -1043,6 +1063,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _locationEnabled.value = pref[LOCATION_ENABLED_KEY] ?: false
             _locationPromptDismissed.value = pref[LOCATION_PROMPT_DISMISSED_KEY] ?: false
             _locationPrecision.value = LocationPrecision.fromValue(pref[LOCATION_PRECISION_KEY])
+            _meshCoreEnabled.value = pref[nsMeshCore] ?: true
+            companionManager.setMeshCoreEnabled(_meshCoreEnabled.value)
             val lat = pref[LOCATION_LAT_KEY]
             val lon = pref[LOCATION_LON_KEY]
             if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)

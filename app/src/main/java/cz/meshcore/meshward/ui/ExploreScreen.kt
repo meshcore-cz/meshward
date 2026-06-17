@@ -171,7 +171,8 @@ fun ExploreScreen(
                     else Text("Explore")
                 },
                 actions = {
-                    ConnectionStatusButton(vm)
+                    // Hide the (potentially wide) status chip while searching so the field has room.
+                    if (!searching) ConnectionStatusButton(vm)
                     IconButton(onClick = {
                         searching = !searching
                         if (!searching) query = ""
@@ -181,7 +182,7 @@ fun ExploreScreen(
                             contentDescription = if (searching) "Close search" else "Search",
                         )
                     }
-                    OverflowMenu(
+                    if (!searching) OverflowMenu(
                         onOpenSettings = onOpenSettings,
                         onOpenAbout = onOpenAbout,
                         extraItems = { dismiss ->

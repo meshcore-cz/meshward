@@ -116,7 +116,8 @@ fun ChatsScreen(
                     }
                 },
                 actions = {
-                    ConnectionStatusButton(vm)
+                    // Hide the (potentially wide) status chip while searching so the field has room.
+                    if (!searching) ConnectionStatusButton(vm)
                     IconButton(onClick = {
                         searching = !searching
                         if (!searching) query = ""
@@ -126,7 +127,7 @@ fun ChatsScreen(
                             contentDescription = if (searching) "Close search" else "Search",
                         )
                     }
-                    OverflowMenu(onOpenSettings = onOpenSettings, onOpenAbout = onOpenAbout)
+                    if (!searching) OverflowMenu(onOpenSettings = onOpenSettings, onOpenAbout = onOpenAbout)
                 },
             )
         },

@@ -188,6 +188,8 @@ fun ConversationScreen(
     // This conversation's notification mode (drives the three-dot Notifications submenu).
     val notifModes by vm.notifModes.collectAsState()
     val notifMode = notifModes[peerHex] ?: cz.meshcore.meshward.data.NotifMode.ALL
+    // The conversation's display name, reused by the search field/hint to say where we're searching.
+    val convoName = if (isSelf) NOTE_TO_SELF else profile.name
     // The network this channel is currently bridged on — shown on the MeshCore chips in place of the
     // generic "MeshCore" label. Blank when no network is active (falls back to "MeshCore").
     val activeNetwork by vm.activeNetwork.collectAsState()
@@ -230,7 +232,22 @@ fun ConversationScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    if (onBack != null) {
+                    if (searching) {
+                        // While searching, anchor the bar with the conversation's avatar so it's clear
+                        // which chat is being searched (the back arrow's job is taken by the ✕ action).
+                        Box(Modifier.padding(start = 12.dp, end = 4.dp)) {
+                            if (isSelf) {
+                                NoteToSelfAvatar(size = 32)
+                            } else {
+                                Avatar(
+                                    seed = peerHex,
+                                    label = profile.name,
+                                    size = 32,
+                                    identiconKey = if (!isChannel) profile.pubKeyHex else null,
+                                )
+                            }
+                        }
+                    } else if (onBack != null) {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
@@ -238,7 +255,7 @@ fun ConversationScreen(
                 },
                 title = {
                     if (searching) {
-                        SearchField(searchQuery, { searchQuery = it }, "Search messages")
+                        SearchField(searchQuery, { searchQuery = it }, "Search in $convoName")
                     } else {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -300,20 +317,25 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+                    // While searching, the title is the search field — just offer a close action.
+                    // Otherwise the status chip (which can be wide) sits next to the overflow menu,
+                    // and search moves into the menu to keep the bar from overflowing.
+                    if (searching) {
+                        IconButton(onClick = { searching = false; searchQuery = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close search")
+                        }
+                    } else {
                     ConnectionStatusButton(vm)
-                    IconButton(onClick = {
-                        searching = !searching
-                        if (!searching) searchQuery = ""
-                    }) {
-                        Icon(
-                            if (searching) Icons.Default.Close else Icons.Default.Search,
-                            contentDescription = if (searching) "Close search" else "Search",
-                        )
-                    }
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Search messages") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            onClick = { menuOpen = false; searching = true },
+                        )
+                        HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text(if (isChannel) "Channel info" else "Contact info") },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -369,6 +391,7 @@ fun ConversationScreen(
                             )
                         }
                     }
+                    }
                 },
             )
         },
@@ -410,7 +433,7 @@ fun ConversationScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { padding ->
         if (searching && searchQuery.isBlank()) {
-            SearchHint("Start typing to search messages…", Modifier.fillMaxSize().padding(padding))
+            SearchHint("Start typing to search messages in $convoName…", Modifier.fillMaxSize().padding(padding))
             return@Scaffold
         }
         // reverseLayout pins the newest message (paged index 0) to the bottom and loads older pages

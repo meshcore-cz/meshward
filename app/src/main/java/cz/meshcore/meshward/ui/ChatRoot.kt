@@ -168,6 +168,8 @@ fun ChatRoot(vm: ChatViewModel) {
             openMeshCoreLog = { push(Dest.MeshCoreLog) },
             openTopology = { push(Dest.Topology) },
             openProfile = { push(Dest.Profile(it)) },
+            openCompanions = { push(Dest.MeshCompanion) },
+            openNetworkDetail = { push(Dest.NetworkDetail(it)) },
         ),
     ) {
     AnimatedContent(

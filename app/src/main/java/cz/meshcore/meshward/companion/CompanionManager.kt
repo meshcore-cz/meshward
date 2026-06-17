@@ -77,6 +77,9 @@ class CompanionManager(
 
     @Volatile private var service: SidepathService? = null
 
+    /** Master MeshCore switch (mirrors the app flag). When off, no companion bridges traffic either way. */
+    @Volatile private var meshCoreEnabled: Boolean = true
+
     /** Known networks (built-in + custom), used to verify a device's radio params in AUTO mode. */
     @Volatile private var networks: List<MeshNetwork> = emptyList()
 
@@ -110,6 +113,13 @@ class CompanionManager(
     /** Update the known networks used for AUTO-mode radio verification and "save as network". */
     fun setNetworks(list: List<MeshNetwork>) {
         networks = list
+        refreshAggregate()
+    }
+
+    /** Master MeshCore switch: when off, every companion stops bridging (both directions) and drops its ANNOUNCE bridges. */
+    fun setMeshCoreEnabled(enabled: Boolean) {
+        if (meshCoreEnabled == enabled) return
+        meshCoreEnabled = enabled
         refreshAggregate()
     }
 
@@ -253,6 +263,7 @@ class CompanionManager(
      * its route-independent content digest so MeshCore's repeated re-floods reach the mesh once.
      */
     private fun onRadioPacket(conn: CompanionConnection, raw: ByteArray) {
+        if (!meshCoreEnabled) return
         if (radioBlocked(conn)) return
         val cls = MeshCoreBridgeRules.classify(raw)
         if (cls.mode == ForwardMode.SKIP) return
@@ -264,6 +275,7 @@ class CompanionManager(
 
     /** Outbound sink: put a mesh-sourced packet on every bridge-enabled, connected, unblocked radio. */
     private fun fanOutToRadios(rawOta: ByteArray) {
+        if (!meshCoreEnabled) return
         // De-dup identical wire bytes across the whole bridge (mirrors Go shouldInjectRaw).
         if (!dedup.shouldInjectRaw(rawOta)) return
         connections.values.forEach { conn ->
@@ -324,6 +336,7 @@ class CompanionManager(
      */
     private fun pushBridges() {
         val svc = service ?: return
+        if (!meshCoreEnabled) { svc.setBridgedNetworks(emptyList()); return }
         val byCode = LinkedHashMap<String, BridgeAd>()
         connections.values.forEach { conn ->
             val st = conn.state.value
