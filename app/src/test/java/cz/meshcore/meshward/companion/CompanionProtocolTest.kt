@@ -39,6 +39,20 @@ class CompanionProtocolTest {
         assertArrayEquals(payload, pkt.copyOfRange(2, pkt.size))
     }
 
+    @Test fun encodeSetRadioParams() {
+        // 869.432 MHz / 62.5 kHz / SF7 / CR5 → raw freq 869432 (kHz), raw bw 62500 (Hz)
+        val pkt = CompanionProtocol.setRadioParams(freqHz = 869_432_000, bwHz = 62_500, sf = 7, cr = 5)
+        assertEquals(11, pkt[0].toInt())
+        assertEquals(869432L, le32At(pkt, 1))
+        assertEquals(62500L, le32At(pkt, 5))
+        assertEquals(7, pkt[9].toInt())
+        assertEquals(5, pkt[10].toInt())
+    }
+
+    @Test fun encodeSetTxPower() {
+        assertArrayEquals(byteArrayOf(12, 22), CompanionProtocol.setTxPower(22))
+    }
+
     @Test fun decodeOkErrBattery() {
         assertTrue(CompanionProtocol.decode(byteArrayOf(0)) is CompanionMessage.Ok)
         val err = CompanionProtocol.decode(byteArrayOf(1, 7)) as CompanionMessage.Err
@@ -67,8 +81,8 @@ class CompanionProtocolTest {
         body.add(30) // maxTx
         key.forEach { body.add(it) }
         repeat(12) { body.add(0) }   // lat(4) + lon(4) + reserved(4)
-        le32(868000).forEach { body.add(it) } // freq
-        le32(250).forEach { body.add(it) }    // bw
+        le32(869432).forEach { body.add(it) } // freq raw (MHz*1000 = kHz)
+        le32(62500).forEach { body.add(it) }  // bw raw (kHz*1000 = Hz)
         body.add(11) // sf
         body.add(5)  // cr
         "MeshCore-desk".toByteArray().forEach { body.add(it) }
@@ -77,8 +91,8 @@ class CompanionProtocolTest {
         val si = CompanionProtocol.decode(pkt) as CompanionMessage.SelfInfo
         assertEquals("MeshCore-desk", si.name)
         assertEquals(key.joinToString("") { "%02x".format(it.toInt() and 0xFF) }, si.publicKey)
-        assertEquals(868000L, si.radioFreqKHz)
-        assertEquals(250L, si.radioBwKHz)
+        assertEquals(869_432_000L, si.radioFreqHz) // 869.432 MHz in Hz
+        assertEquals(62_500L, si.radioBwHz)        // 62.5 kHz in Hz
         assertEquals(11, si.radioSf)
         assertEquals(5, si.radioCr)
         assertEquals(22, si.txPower)
@@ -91,6 +105,10 @@ class CompanionProtocolTest {
         val resp = CompanionProtocol.decode(byteArrayOf(0x7E)) as CompanionMessage.Raw
         assertTrue(!resp.isPush)
     }
+
+    private fun le32At(b: ByteArray, i: Int): Long =
+        (b[i].toLong() and 0xFF) or ((b[i + 1].toLong() and 0xFF) shl 8) or
+            ((b[i + 2].toLong() and 0xFF) shl 16) or ((b[i + 3].toLong() and 0xFF) shl 24)
 
     private fun le32(v: Long): ByteArray = byteArrayOf(
         (v and 0xFF).toByte(),

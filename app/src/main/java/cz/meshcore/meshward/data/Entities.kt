@@ -45,6 +45,7 @@ data class MeshNetwork(
     val bandwidthKhz: Double = 0.0,
     val spreadingFactor: Int = 0,
     val codingRate: Int = 0,      // the N in coding rate 4/N
+    val txPower: Int = 0,         // default TX power in dBm for this network; 0 = unspecified
     val analyzerUrls: String = "",
     val mqttEndpoints: String = "",
     val geoJson: String = "",     // raw GeoJSON geometry (Polygon / MultiPolygon), may be blank
@@ -55,9 +56,9 @@ data class MeshNetwork(
     // always materialize as custom (isBuiltin = false).
     constructor(
         code: String, name: String, freqMhz: Double, bandwidthKhz: Double, spreadingFactor: Int,
-        codingRate: Int, analyzerUrls: String, mqttEndpoints: String, geoJson: String,
+        codingRate: Int, txPower: Int, analyzerUrls: String, mqttEndpoints: String, geoJson: String,
         description: String,
-    ) : this(code, name, freqMhz, bandwidthKhz, spreadingFactor, codingRate, analyzerUrls,
+    ) : this(code, name, freqMhz, bandwidthKhz, spreadingFactor, codingRate, txPower, analyzerUrls,
         mqttEndpoints, geoJson, description, isBuiltin = false)
 }
 

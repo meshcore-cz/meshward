@@ -6,8 +6,10 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import cz.meshcore.meshward.dataStore
+import cz.meshcore.meshward.data.MeshNetwork
 import cz.meshcore.sidepath.protocol.BridgeAd
 import cz.meshcore.sidepath.service.SidepathService
+import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +24,23 @@ private val COMPANIONS_KEY = stringPreferencesKey("meshcore_companions")
 
 /** An attached USB serial device offered in the add-companion picker. */
 data class CompanionUsbDevice(val key: String, val name: String, val vendorId: Int, val productId: Int)
+
+/** True when this network defines a full LoRa radio config (so a device can be verified against it). */
+fun MeshNetwork.hasRadioParams(): Boolean =
+    freqMhz > 0.0 && bandwidthKhz > 0.0 && spreadingFactor > 0 && codingRate > 0
+
+/**
+ * Whether a device's live radio params match this network's. Frequency/bandwidth are compared with a
+ * small tolerance (the device reports kHz-resolution values), SF/CR exactly.
+ */
+fun MeshNetwork.matchesDevice(si: CompanionMessage.SelfInfo): Boolean {
+    val netFreqHz = (freqMhz * 1_000_000.0).toLong()
+    val netBwHz = (bandwidthKhz * 1_000.0).toLong()
+    return spreadingFactor == si.radioSf &&
+        codingRate == si.radioCr &&
+        abs(netFreqHz - si.radioFreqHz) <= 2_000 &&
+        abs(netBwHz - si.radioBwHz) <= 1_000
+}
 
 /**
  * Owns all locally-attached MeshCore companions. Supports *N* radios (each its own
@@ -57,9 +76,14 @@ class CompanionManager(
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 
     @Volatile private var service: SidepathService? = null
-    private val activeNetworkCode = MutableStateFlow("")
+
+    /** Known networks (built-in + custom), used to verify a device's radio params in AUTO mode. */
+    @Volatile private var networks: List<MeshNetwork> = emptyList()
 
     private val scanner = CompanionBleScanner(context)
+
+    /** Shared forwarding/dedup rules, ported from the Go bridge (see [MeshCoreBridgeRules]). */
+    private val dedup = BridgeDedup()
 
     init {
         scope.launch {
@@ -83,11 +107,10 @@ class CompanionManager(
         pushBridges()
     }
 
-    /** The app's active MeshCore network code, used to tag bridged packets when no per-companion override. */
-    fun setActiveNetworkCode(code: String) {
-        if (activeNetworkCode.value == code) return
-        activeNetworkCode.value = code
-        pushBridges()
+    /** Update the known networks used for AUTO-mode radio verification and "save as network". */
+    fun setNetworks(list: List<MeshNetwork>) {
+        networks = list
+        refreshAggregate()
     }
 
     // ---- user actions ----
@@ -180,9 +203,19 @@ class CompanionManager(
         persistAndRefresh()
     }
 
-    fun setNetworkOverride(address: String, code: String) {
-        connections[address]?.updateConfig { it.copy(networkCodeOverride = code) }
+    fun setRadioMode(address: String, mode: CompanionRadioMode) {
+        connections[address]?.updateConfig { it.copy(radioMode = mode) }
         persistAndRefresh()
+    }
+
+    fun setRadioNetwork(address: String, code: String) {
+        connections[address]?.updateConfig { it.copy(radioNetworkCode = code) }
+        persistAndRefresh()
+    }
+
+    /** Manual mode: write radio params to the device (true Hz / dBm). */
+    fun applyManualRadio(address: String, freqHz: Long, bwHz: Long, sf: Int, cr: Int, txPower: Int) {
+        connections[address]?.applyRadio(freqHz, bwHz, sf, cr, txPower)
     }
 
     /** Disconnect everything (called when the ViewModel/service tears down). */
@@ -200,29 +233,88 @@ class CompanionManager(
             context = context,
             scope = scope,
             initialConfig = cfg,
-            onRadioRx = { conn, raw -> service?.injectMeshCoreFromRadio(raw, effectiveCode(conn)) },
+            onRadioRx = { conn, raw -> onRadioPacket(conn, raw) },
             onLog = { msg -> appendLog("${cfg.address.takeLast(5)}: $msg") },
         ).also { conn ->
             // Mirror each connection's live state into the aggregate and persist config changes.
             scope.launch { conn.state.collect { refreshAggregate() } }
         }
 
+    /**
+     * The network code tagged onto this companion's bridged packets: its chosen network in AUTO mode,
+     * or blank (untagged) in MANUAL mode — a manually-configured radio has no network identity.
+     */
     private fun effectiveCode(conn: CompanionConnection): String =
-        conn.config.networkCodeOverride.ifBlank { activeNetworkCode.value }
+        if (conn.config.radioMode == CompanionRadioMode.AUTO) conn.config.radioNetworkCode else ""
 
-    /** Outbound sink: put a mesh-sourced packet on every bridge-enabled, connected radio. */
+    /**
+     * Inbound (radio → mesh): apply the shared bridge rules before injecting. The radio is gated by
+     * AUTO-mode radio match; the packet is classified (skip undecodable/unsupported) and de-duped on
+     * its route-independent content digest so MeshCore's repeated re-floods reach the mesh once.
+     */
+    private fun onRadioPacket(conn: CompanionConnection, raw: ByteArray) {
+        if (radioBlocked(conn)) return
+        val cls = MeshCoreBridgeRules.classify(raw)
+        if (cls.mode == ForwardMode.SKIP) return
+        if (!dedup.shouldForwardPacket(raw, cls.isAdvert)) return
+        // Sidepath delivery is flood-only here; DIRECT-targeted packets are still forwarded (the
+        // target hash is an optimisation the Go bridge uses for direct delivery — not yet wired).
+        service?.injectMeshCoreFromRadio(raw, effectiveCode(conn))
+    }
+
+    /** Outbound sink: put a mesh-sourced packet on every bridge-enabled, connected, unblocked radio. */
     private fun fanOutToRadios(rawOta: ByteArray) {
+        // De-dup identical wire bytes across the whole bridge (mirrors Go shouldInjectRaw).
+        if (!dedup.shouldInjectRaw(rawOta)) return
         connections.values.forEach { conn ->
-            if (conn.config.bridgeEnabled && conn.state.value.link == CompanionLinkState.READY) {
+            if (conn.config.bridgeEnabled && conn.state.value.link == CompanionLinkState.READY && !radioBlocked(conn)) {
                 conn.transmit(rawOta)
             }
         }
     }
 
     private fun refreshAggregate() {
-        _companions.value = connections.values.map { it.state.value }
+        _companions.value = connections.values.map { conn ->
+            val st = conn.state.value
+            st.copy(
+                radioBlocked = radioBlocked(conn),
+                radioStatus = radioStatus(conn),
+                matchedNetworkCode = st.selfInfo?.let { matchedNetwork(it)?.code } ?: "",
+            )
+        }
         pushBridges()
     }
+
+    // ---- AUTO-mode radio verification ----
+
+    /** The network AUTO mode enforces for [conn]: the one it's been assigned, or null if none chosen. */
+    private fun targetNetwork(conn: CompanionConnection): MeshNetwork? {
+        val code = effectiveCode(conn)
+        return networks.firstOrNull { it.code == code }
+    }
+
+    /** True when AUTO mode is on and the device's live radio params don't match the target network. */
+    private fun radioBlocked(conn: CompanionConnection): Boolean {
+        if (conn.config.radioMode != CompanionRadioMode.AUTO) return false
+        val si = conn.state.value.selfInfo ?: return false // not read yet — can't decide, don't block
+        val net = targetNetwork(conn)?.takeIf { it.hasRadioParams() } ?: return false
+        return !net.matchesDevice(si)
+    }
+
+    private fun radioStatus(conn: CompanionConnection): String {
+        val si = conn.state.value.selfInfo ?: return ""
+        if (conn.config.radioMode == CompanionRadioMode.MANUAL) return "Manual configuration"
+        val code = effectiveCode(conn)
+        if (code.isBlank()) return "No network selected — choose one to bridge"
+        val net = targetNetwork(conn) ?: return "Network “$code” is unknown — cannot verify"
+        if (!net.hasRadioParams()) return "Network ${net.code} has no radio params to verify"
+        return if (net.matchesDevice(si)) "Matches ${net.code}"
+        else "Device radio doesn't match ${net.code} — bridge disabled"
+    }
+
+    /** The known network whose radio params match the device, or null. Used to offer "save as network". */
+    private fun matchedNetwork(si: cz.meshcore.meshward.companion.CompanionMessage.SelfInfo): MeshNetwork? =
+        networks.firstOrNull { it.hasRadioParams() && it.matchesDevice(si) }
 
     /**
      * Advertise the networks our live bridges serve in the Sidepath ANNOUNCE. One [BridgeAd] per
@@ -235,15 +327,15 @@ class CompanionManager(
         val byCode = LinkedHashMap<String, BridgeAd>()
         connections.values.forEach { conn ->
             val st = conn.state.value
-            if (!conn.config.bridgeEnabled || st.link != CompanionLinkState.READY) return@forEach
+            if (!conn.config.bridgeEnabled || st.link != CompanionLinkState.READY || radioBlocked(conn)) return@forEach
             val code = effectiveCode(conn)
             if (code.isBlank() || byCode.containsKey(code)) return@forEach
             val si = st.selfInfo
             val custom = si?.let {
                 BridgeAd(
                     code = code,
-                    freqHz = it.radioFreqKHz * 1000,
-                    bandwidthHz = it.radioBwKHz * 1000,
+                    freqHz = it.radioFreqHz,
+                    bandwidthHz = it.radioBwHz,
                     sf = it.radioSf,
                     cr = it.radioCr,
                 )
@@ -279,7 +371,9 @@ class CompanionManager(
                     label = o.optString("label", ""),
                     enabled = o.optBoolean("enabled", true),
                     bridgeEnabled = o.optBoolean("bridge", true),
-                    networkCodeOverride = o.optString("network", ""),
+                    radioMode = runCatching { CompanionRadioMode.valueOf(o.optString("radioMode", "AUTO")) }
+                        .getOrDefault(CompanionRadioMode.AUTO),
+                    radioNetworkCode = o.optString("radioNetwork", ""),
                 )
             }
         }.getOrDefault(emptyList())
@@ -296,7 +390,8 @@ class CompanionManager(
                     .put("label", c.label)
                     .put("enabled", c.enabled)
                     .put("bridge", c.bridgeEnabled)
-                    .put("network", c.networkCodeOverride),
+                    .put("radioMode", c.radioMode.name)
+                    .put("radioNetwork", c.radioNetworkCode),
             )
         }
         context.dataStore.edit { it[COMPANIONS_KEY] = arr.toString() }

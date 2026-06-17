@@ -24,7 +24,6 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -62,17 +61,18 @@ fun NetworkDetailScreen(
     onOpenRxLog: () -> Unit = {},
 ) {
     val networks by vm.networks.collectAsState()
-    val auto by vm.networkAuto.collectAsState()
     val detected by vm.detectedNetworks.collectAsState()
     val activeNetwork by vm.activeNetwork.collectAsState()
+    val activeIsLocal by vm.activeNetworkIsLocal.collectAsState()
     val topology by vm.topology.collectAsState()
     val discovered by vm.discoveredContacts.collectAsState()
     val stats by vm.stats.collectAsState()
     val isUnknown = code == cz.meshcore.meshward.UNKNOWN_NETWORK_CODE
     val net = networks.firstOrNull { it.code == code }
     val isActive = activeNetwork?.code == code
-    // This network is the one in effect because a nearby bridge announced it (vs. a manual pin).
-    val isAutoDetected = auto && detected.any { it.code == code }
+    // This network is the one in effect because it's the local companion's radio (vs. auto-detected).
+    val isLocal = isActive && activeIsLocal
+    val isAutoDetected = isActive && !activeIsLocal && detected.any { it.code == code }
     // Sidepath gateways currently advertising a bridge into this network (§8.3).
     val bridges = remember(topology, code) { topology.filter { e -> e.bridges.any { it.code == code } } }
 
@@ -117,10 +117,16 @@ fun NetworkDetailScreen(
                         Text(net.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     }
                     if (isActive) {
-                        LiveStatusLine(if (isAutoDetected) "Live · active network · auto-detected" else "Live · active network")
+                        LiveStatusLine(
+                            when {
+                                isLocal -> "Live · active network · local radio"
+                                isAutoDetected -> "Live · active network · auto-detected"
+                                else -> "Live · active network"
+                            },
+                        )
                     } else {
                         Text(
-                            if (isAutoDetected) "MeshCore network · detected nearby" else "MeshCore network",
+                            if (detected.any { it.code == code }) "MeshCore network · detected nearby" else "MeshCore network",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -129,9 +135,6 @@ fun NetworkDetailScreen(
                         Text(net.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (!isActive) {
-                            Button(onClick = { vm.setActiveNetwork(net.code) }) { Text("Set as active") }
-                        }
                         if (isActive) {
                             OutlinedButton(onClick = onOpenRxLog) {
                                 Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -139,11 +142,12 @@ fun NetworkDetailScreen(
                                 Text("Rx Log")
                             }
                         }
-                        // Manage detection / pinning lives in Settings → MeshCore Networks.
+                        // The active network is set by a local companion or auto-detection — manage it
+                        // on the Local MeshCore Companion page / Settings → MeshCore Networks.
                         OutlinedButton(onClick = onOpenNetworks) {
                             Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.size(6.dp))
-                            Text("Change network")
+                            Text("Networks")
                         }
                     }
                 }

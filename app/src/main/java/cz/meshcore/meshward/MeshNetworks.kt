@@ -29,6 +29,7 @@ fun NetworkDef.toMeshNetwork(): MeshNetwork = MeshNetwork(
     bandwidthKhz = if (bandwidthHz > 0) bandwidthHz / 1_000.0 else 0.0,
     spreadingFactor = sf,
     codingRate = cr,
+    txPower = txPower,
     analyzerUrls = analyzerUrls.joinToString("\n"),
     mqttEndpoints = mqtt.joinToString("\n"),
     geoJson = geoJson,

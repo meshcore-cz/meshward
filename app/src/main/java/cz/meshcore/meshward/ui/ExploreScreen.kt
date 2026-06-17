@@ -89,7 +89,7 @@ fun ExploreScreen(
     val activeNetwork by vm.activeNetwork.collectAsState()
     val topology by vm.topology.collectAsState()
     val detectedNetworks by vm.detectedNetworks.collectAsState()
-    val networkAuto by vm.networkAuto.collectAsState()
+    val activeNetworkIsLocal by vm.activeNetworkIsLocal.collectAsState()
     val meshCoreTrafficSeen by vm.meshCoreTrafficSeen.collectAsState()
     val savedContactKeys by vm.savedContactKeys.collectAsState()
     val meshCoreTotal by vm.meshCoreTotal.collectAsState()
@@ -222,7 +222,7 @@ fun ExploreScreen(
                             code = activeNet.code,
                             name = activeNet.name,
                             summary = networkRadioSummary(activeNet),
-                            autoDetected = networkAuto,
+                            local = activeNetworkIsLocal,
                             bridgeCount = bridgeCount,
                             packetCount = meshCoreTotal,
                             lastPacketAtMs = lastMeshCorePacketAtMs,
@@ -396,7 +396,7 @@ private fun ActiveNetworkCard(
     code: String,
     name: String,
     summary: String,
-    autoDetected: Boolean,
+    local: Boolean,
     bridgeCount: Int,
     packetCount: Int,
     lastPacketAtMs: Long?,
@@ -433,7 +433,7 @@ private fun ActiveNetworkCard(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Icon(Icons.Default.Hub, contentDescription = null, tint = subtle, modifier = Modifier.size(13.dp))
-                    val detection = if (autoDetected) "auto-detected" else "manual"
+                    val detection = if (local) "local radio" else "auto-detected"
                     val bridges = if (bridgeCount > 0) " · $bridgeCount ${if (bridgeCount == 1) "bridge" else "bridges"}" else ""
                     Text(
                         "MeshCore · $detection$bridges",

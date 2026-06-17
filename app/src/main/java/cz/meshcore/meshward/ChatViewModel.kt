@@ -22,7 +22,9 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
+import cz.meshcore.meshward.companion.CompanionLinkState
 import cz.meshcore.meshward.companion.CompanionManager
+import cz.meshcore.meshward.companion.CompanionRadioMode
 import cz.meshcore.meshward.companion.CompanionScanResult
 import cz.meshcore.meshward.companion.CompanionState
 import cz.meshcore.meshward.companion.CompanionUsbDevice
@@ -107,16 +109,9 @@ private val LOCATION_PROMPT_DISMISSED_KEY = booleanPreferencesKey("location_prom
 private val LOCATION_LAT_KEY = doublePreferencesKey("location_lat")
 private val LOCATION_LON_KEY = doublePreferencesKey("location_lon")
 private val LOCATION_PRECISION_KEY = stringPreferencesKey("location_precision")
-// The manually pinned MeshCore Network code (its short code, e.g. "CZ"), used only when auto is off.
-private val ACTIVE_NETWORK_CODE_KEY = stringPreferencesKey("active_network_code")
-// Whether the active network is auto-detected from heard bridges (default) vs. manually pinned.
-private val NETWORK_AUTO_KEY = booleanPreferencesKey("network_auto")
 
 /** Default MeshCore packet analyzer base URL; the content hash is appended. */
 const val DEFAULT_ANALYZER_URL = "https://analyzer.meshcore.cz/#/packets/"
-
-/** The MeshCore Network pinned by default (used only as the manual fallback before auto-detection). */
-const val DEFAULT_NETWORK_CODE = "CZ"
 
 /**
  * Sentinel network code for MeshCore traffic heard without a known network (no bridge advertised one).
@@ -337,8 +332,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val nsFloodTtl = intPreferencesKey("${identity.id}_flood_ttl")
     private val nsPhy = stringPreferencesKey("${identity.id}_phy_mode")
     private val nsAnalyzer = stringPreferencesKey("${identity.id}_analyzer_urls")
-    private val nsNetCode = stringPreferencesKey("${identity.id}_active_network_code")
-    private val nsNetAuto = booleanPreferencesKey("${identity.id}_network_auto")
 
     /** One-shot signal to the Activity to relaunch the app (after an identity switch / seed change). */
     private val _relaunch = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -412,11 +405,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val exploreHideSaved: StateFlow<Boolean> = _exploreHideSaved.asStateFlow()
     fun setExploreHideSaved(v: Boolean) { _exploreHideSaved.value = v }
 
+    // Manages locally-attached MeshCore companion radios and the radio↔mesh packet bridge. Declared
+    // here (ahead of the network derivation) because a connected companion's chosen network is the
+    // authoritative source of the app's active network — see [activeNetwork].
+    val companionManager = CompanionManager(app, viewModelScope)
+    val companions: StateFlow<List<CompanionState>> = companionManager.companions
+
     // ---- MeshCore Networks (auto-detected from bridge announces) --------------
     // Built-in definitions come from sidepath-protocol (NetworkDefs), refreshable from a URL and
     // cached on disk; user-added ones live in the DB as custom overrides. The effective list is the
-    // union, deduped by code. The active network is auto-detected from nearby gateway bridges by
-    // default ([networkAuto]); turning auto off lets the user pin one manually ([activeNetworkCode]).
+    // union, deduped by code. The active network is derived (never pinned): a connected local
+    // companion's chosen network wins, else the strongest auto-detected nearby network.
     private val _builtinNetworks = MutableStateFlow(loadNetworkDefs(app))
 
     val networks: StateFlow<List<MeshNetwork>> =
@@ -426,13 +425,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             custom.forEach { byCode[it.code] = it } // a custom network overrides a built-in of the same code
             byCode.values.sortedBy { it.code }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, _builtinNetworks.value.sortedBy { it.code })
-
-    private val _activeNetworkCode = MutableStateFlow(DEFAULT_NETWORK_CODE)
-    val activeNetworkCode: StateFlow<String> = _activeNetworkCode.asStateFlow()
-
-    private val _networkAuto = MutableStateFlow(true)
-    /** When true, the active network is auto-detected from heard bridges; when false it's pinned manually. */
-    val networkAuto: StateFlow<Boolean> = _networkAuto.asStateFlow()
 
     private val _avatarStyle = MutableStateFlow(AvatarStyle.IDENTICON)
     val avatarStyle: StateFlow<AvatarStyle> = _avatarStyle.asStateFlow()
@@ -529,19 +521,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
-     * The network this device is operating in: auto-detected (the strongest/most-recent detected
-     * network) when [networkAuto] is on, else the manually pinned [activeNetworkCode]. Null when the
-     * mesh is stopped, or when auto is on and nothing is detected — callers (Explore) hide the network
-     * card in that case.
+     * The network this device is operating in, fully derived (never manually pinned): a connected,
+     * bridge-enabled local companion's chosen network wins (the local radio is authoritative), else
+     * the strongest/most-recent auto-detected nearby network. Null when the mesh is stopped, or when
+     * nothing is detected and no companion defines one — callers (Explore) hide the network card then.
      */
     val activeNetwork: StateFlow<MeshNetwork?> =
-        combine(networks, detectedNetworks, _activeNetworkCode, _networkAuto, isRunning) { all, detected, code, auto, running ->
+        combine(networks, detectedNetworks, companions, isRunning) { all, detected, comps, running ->
+            if (!running) return@combine null
+            val compCode = comps.firstOrNull {
+                it.config.radioMode == CompanionRadioMode.AUTO && it.config.bridgeEnabled &&
+                    it.link == CompanionLinkState.READY && it.config.radioNetworkCode.isNotBlank()
+            }?.config?.radioNetworkCode
             when {
-                !running -> null
-                auto -> detected.firstOrNull()
-                else -> all.firstOrNull { it.code == code }
+                compCode != null -> all.firstOrNull { it.code == compCode }
+                    ?: MeshNetwork(code = compCode, name = compCode, isBuiltin = true)
+                else -> detected.firstOrNull()
             }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** The [activeNetwork]'s code as a plain string (blank when none), for display and companion fallback. */
+    val activeNetworkCode: StateFlow<String> =
+        activeNetwork.map { it?.code ?: "" }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    /** True when [activeNetwork] is sourced from a connected local companion radio (vs. auto-detection). */
+    val activeNetworkIsLocal: StateFlow<Boolean> =
+        combine(activeNetwork, companions, isRunning) { net, comps, running ->
+            running && net != null && comps.any {
+                it.config.radioMode == CompanionRadioMode.AUTO && it.config.bridgeEnabled &&
+                    it.link == CompanionLinkState.READY && it.config.radioNetworkCode == net.code
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     val connectedPeers: StateFlow<List<PeerInfo>> = _service.flatMapLatest {
         it?.connectedPeers ?: flowOf(emptyList())
@@ -880,10 +890,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }.stateIn(viewModelScope, SharingStarted.Eagerly, shortHex(peerHex))
 
     // ---- local MeshCore companion (BLE) --------------------------------------
+    // [companionManager]/[companions] are declared earlier (ahead of the network derivation).
 
-    /** Manages locally-attached MeshCore companion radios and the radio↔mesh packet bridge. */
-    val companionManager = CompanionManager(app, viewModelScope)
-    val companions: StateFlow<List<CompanionState>> = companionManager.companions
     val companionScanResults: StateFlow<List<CompanionScanResult>> = companionManager.scanResults
     val companionScanning: StateFlow<Boolean> = companionManager.scanning
 
@@ -898,6 +906,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun companionForget(address: String) = companionManager.forget(address)
     fun companionSetBridge(address: String, enabled: Boolean) = companionManager.setBridgeEnabled(address, enabled)
     fun companionSetLabel(address: String, label: String) = companionManager.setLabel(address, label)
+    fun companionSetRadioMode(address: String, mode: CompanionRadioMode) = companionManager.setRadioMode(address, mode)
+    fun companionSetRadioNetwork(address: String, code: String) = companionManager.setRadioNetwork(address, code)
+    fun companionApplyRadio(address: String, freqHz: Long, bwHz: Long, sf: Int, cr: Int, txPower: Int) =
+        companionManager.applyManualRadio(address, freqHz, bwHz, sf, cr, txPower)
 
     // ---- service lifecycle ---------------------------------------------------
 
@@ -949,8 +961,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             pref[FLOOD_TTL_KEY]?.let { e[nsFloodTtl] = it }
             pref[PHY_MODE_KEY]?.let { e[nsPhy] = it }
             pref[ANALYZER_URLS_KEY]?.let { e[nsAnalyzer] = it }
-            pref[ACTIVE_NETWORK_CODE_KEY]?.let { e[nsNetCode] = it }
-            pref[NETWORK_AUTO_KEY]?.let { e[nsNetAuto] = it }
             e[flag] = true
         }
     }
@@ -1033,17 +1043,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _locationEnabled.value = pref[LOCATION_ENABLED_KEY] ?: false
             _locationPromptDismissed.value = pref[LOCATION_PROMPT_DISMISSED_KEY] ?: false
             _locationPrecision.value = LocationPrecision.fromValue(pref[LOCATION_PRECISION_KEY])
-            _activeNetworkCode.value = pref[nsNetCode] ?: DEFAULT_NETWORK_CODE
-            _networkAuto.value = pref[nsNetAuto] ?: true
             val lat = pref[LOCATION_LAT_KEY]
             val lon = pref[LOCATION_LON_KEY]
             if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)
             // Refresh in the background if the user has location on and the permission is still held.
             if (_locationEnabled.value) refreshLocation()
         }
-        // Keep the companion bridge tagging packets with the app's active MeshCore network.
+        // Feed the known networks to the companion manager for AUTO-mode radio verification.
         viewModelScope.launch {
-            activeNetwork.collect { companionManager.setActiveNetworkCode(it?.code ?: "") }
+            networks.collect { companionManager.setNetworks(it) }
         }
         // Drop discovered contacts whose TTL has elapsed so the table doesn't grow unbounded.
         viewModelScope.launch {
@@ -1066,29 +1074,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- MeshCore Networks ----------------------------------------------------
-
-    /**
-     * Pins the device to the network with [code] and turns auto-detection off (a manual pick is an
-     * explicit override). Persisted across restarts.
-     */
-    fun setActiveNetwork(code: String) {
-        viewModelScope.launch {
-            getApplication<Application>().dataStore.edit {
-                it[nsNetCode] = code
-                it[nsNetAuto] = false
-            }
-            _activeNetworkCode.value = code
-            _networkAuto.value = false
-        }
-    }
-
-    /** Toggles auto-detection of the active network from heard bridges (persisted across restarts). */
-    fun setNetworkAuto(auto: Boolean) {
-        viewModelScope.launch {
-            getApplication<Application>().dataStore.edit { it[nsNetAuto] = auto }
-            _networkAuto.value = auto
-        }
-    }
 
     /**
      * Refreshes the bundled network definitions from [url] (download + validate + cache). On success
@@ -2424,11 +2409,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             identityStore.setSeed(identity.id, clean)
             identity = identity.copy(seedHex = clean)
-            // Switching keypair invalidates the previously detected/pinned MeshCore network: drop back
-            // to auto-detect so the active network reads none until the mesh surfaces one again.
-            getApplication<Application>().dataStore.edit { it[nsNetAuto] = true }
             _seedHex.value = clean
-            _networkAuto.value = true
             processed.clear()
             restartService()
             refreshIdentities()

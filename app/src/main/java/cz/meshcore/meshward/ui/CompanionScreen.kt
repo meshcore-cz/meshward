@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +25,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -49,7 +52,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
 import cz.meshcore.meshward.companion.CompanionLinkState
+import cz.meshcore.meshward.companion.CompanionMessage
+import cz.meshcore.meshward.companion.CompanionRadioMode
 import cz.meshcore.meshward.companion.CompanionState
+import cz.meshcore.meshward.data.MeshNetwork
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -253,20 +259,8 @@ private fun CompanionDetail(vm: ChatViewModel, c: CompanionState) {
             Field("TX queue", c.core?.queueLen?.toString() ?: "")
         }
 
-        // ---- Radio (read-only this pass) ----
-        SectionCard("Radio") {
-            val si = c.selfInfo
-            Field("Frequency", si?.let { if (it.radioFreqKHz > 0) "%.3f MHz".format(it.radioFreqKHz / 1000.0) else "" } ?: "")
-            Field("Bandwidth", si?.let { if (it.radioBwKHz > 0) "%.1f kHz".format(it.radioBwKHz.toDouble()) else "" } ?: "")
-            Field("Spreading factor", si?.radioSf?.takeIf { it > 0 }?.toString() ?: "")
-            Field("Coding rate", si?.radioCr?.takeIf { it > 0 }?.toString() ?: "")
-            Field("TX power", si?.txPower?.let { "$it dBm (max ${si.maxTxPower})" } ?: "")
-            Text(
-                "Changing radio parameters from Meshward is coming soon.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        // ---- Radio ----
+        RadioSection(vm, c)
 
         // ---- Identity (read-only this pass) ----
         SectionCard("Identity") {
@@ -295,7 +289,19 @@ private fun CompanionDetail(vm: ChatViewModel, c: CompanionState) {
                     onCheckedChange = { vm.companionSetBridge(c.address, it) },
                 )
             }
-            Field("Network code", c.config.networkCodeOverride.ifBlank { "(app active network)" })
+            if (c.radioBlocked) {
+                Text(
+                    "Bridging is blocked: the device's radio doesn't match the selected network. " +
+                        "Fix the radio or switch to manual mode in the Radio section.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Field(
+                "Network code",
+                if (c.config.radioMode == CompanionRadioMode.AUTO) c.config.radioNetworkCode.ifBlank { "(none selected)" }
+                else "(manual — untagged)",
+            )
             Field("Packets in (radio → mesh)", c.bridgeRxCount.toString())
             Field("Packets out (mesh → radio)", c.bridgeTxCount.toString())
             Field("Last activity", if (c.lastBridgeActivityMs > 0) companionAgo(c.lastBridgeActivityMs) else "—")
@@ -435,6 +441,174 @@ private fun DevicePickRow(title: String, subtitle: String, onClick: () -> Unit) 
             )
         }
     }
+}
+
+@Composable
+private fun RadioSection(vm: ChatViewModel, c: CompanionState) {
+    val networks by vm.networks.collectAsState()
+    val si = c.selfInfo
+    var showSave by remember { mutableStateOf(false) }
+
+    SectionCard("Radio") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = c.config.radioMode == CompanionRadioMode.AUTO,
+                onClick = { vm.companionSetRadioMode(c.address, CompanionRadioMode.AUTO) },
+                label = { Text("Automatic") },
+            )
+            FilterChip(
+                selected = c.config.radioMode == CompanionRadioMode.MANUAL,
+                onClick = { vm.companionSetRadioMode(c.address, CompanionRadioMode.MANUAL) },
+                label = { Text("Manual") },
+            )
+        }
+
+        if (c.config.radioMode == CompanionRadioMode.AUTO) {
+            // AUTO: a network must be chosen. It defines this radio's identity — bridged packets are
+            // tagged with its code, and the device's radio is verified against it on each connection.
+            Text(
+                "Pick this radio's MeshCore network. Its packets are tagged with the network code, and " +
+                    "the device's radio is checked against it — if it doesn't match, bridging is disabled " +
+                    "until you fix the radio (or switch to manual).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            NetworkPicker(networks, c.config.radioNetworkCode) { vm.companionSetRadioNetwork(c.address, it) }
+            if (c.radioStatus.isNotBlank()) {
+                Text(
+                    c.radioStatus,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (c.radioBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                )
+            }
+            DeviceRadioFields(si)
+        } else {
+            // MANUAL: the radio is configured by hand and has no network identity — packets bridge untagged.
+            Text(
+                "Set the radio by hand. A manually-configured radio has no network, so its bridged " +
+                    "packets carry no network code.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ManualRadioEditor(si) { f, b, s, cr, tx -> vm.companionApplyRadio(c.address, f, b, s, cr, tx) }
+        }
+
+        // Offer to capture a config that matches no known network as a new network.
+        if (si != null && si.radioSf > 0 && c.matchedNetworkCode.isBlank()) {
+            OutlinedButton(onClick = { showSave = true }) { Text("Save as network") }
+        }
+    }
+
+    if (showSave && si != null) {
+        SaveNetworkDialog(
+            si = si,
+            onSave = { vm.upsertNetwork(it); showSave = false },
+            onDismiss = { showSave = false },
+        )
+    }
+}
+
+@Composable
+private fun DeviceRadioFields(si: CompanionMessage.SelfInfo?) {
+    Field("Frequency", si?.let { if (it.radioFreqHz > 0) "%.3f MHz".format(it.radioFreqHz / 1_000_000.0) else "" } ?: "")
+    Field("Bandwidth", si?.let { if (it.radioBwHz > 0) "%.1f kHz".format(it.radioBwHz / 1000.0) else "" } ?: "")
+    Field("Spreading factor", si?.radioSf?.takeIf { it > 0 }?.toString() ?: "")
+    Field("Coding rate", si?.radioCr?.takeIf { it > 0 }?.toString() ?: "")
+    Field("TX power", si?.txPower?.let { "$it dBm (max ${si.maxTxPower})" } ?: "")
+}
+
+@Composable
+private fun NetworkPicker(networks: List<MeshNetwork>, selectedCode: String, onSelect: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val label = networks.firstOrNull { it.code == selectedCode }?.let { "${it.code} · ${it.name}" }
+        ?: "Select a network"
+    Box {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("Network: $label")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            networks.forEach { n ->
+                DropdownMenuItem(
+                    text = { Text("${n.code} · ${n.name}") },
+                    onClick = { onSelect(n.code); open = false },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManualRadioEditor(si: CompanionMessage.SelfInfo?, onApply: (Long, Long, Int, Int, Int) -> Unit) {
+    var freq by remember(si) { mutableStateOf(si?.takeIf { it.radioFreqHz > 0 }?.let { "%.3f".format(it.radioFreqHz / 1_000_000.0) } ?: "") }
+    var bw by remember(si) { mutableStateOf(si?.takeIf { it.radioBwHz > 0 }?.let { "%.1f".format(it.radioBwHz / 1000.0) } ?: "") }
+    var sf by remember(si) { mutableStateOf(si?.radioSf?.takeIf { it > 0 }?.toString() ?: "") }
+    var cr by remember(si) { mutableStateOf(si?.radioCr?.takeIf { it > 0 }?.toString() ?: "") }
+    var tx by remember(si) { mutableStateOf(si?.txPower?.takeIf { it > 0 }?.toString() ?: "") }
+    val num = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)
+    Text(
+        "Set the device's radio directly. These writes are firmware-derived; verify on your hardware.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(freq, { freq = it }, label = { Text("Freq (MHz)") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+        OutlinedTextField(bw, { bw = it }, label = { Text("BW (kHz)") }, singleLine = true, keyboardOptions = num, modifier = Modifier.weight(1f))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(sf, { sf = it.filter(Char::isDigit).take(2) }, label = { Text("SF") }, singleLine = true, modifier = Modifier.weight(1f))
+        OutlinedTextField(cr, { cr = it.filter(Char::isDigit).take(1) }, label = { Text("CR 4/N") }, singleLine = true, modifier = Modifier.weight(1f))
+        OutlinedTextField(tx, { tx = it.filter(Char::isDigit).take(2) }, label = { Text("TX dBm") }, singleLine = true, modifier = Modifier.weight(1f))
+    }
+    Button(
+        onClick = {
+            val f = ((freq.toDoubleOrNull() ?: 0.0) * 1_000_000).toLong()
+            val b = ((bw.toDoubleOrNull() ?: 0.0) * 1_000).toLong()
+            onApply(f, b, sf.toIntOrNull() ?: 0, cr.toIntOrNull() ?: 0, tx.toIntOrNull() ?: 0)
+        },
+        enabled = freq.isNotBlank() && bw.isNotBlank() && sf.isNotBlank() && cr.isNotBlank(),
+    ) { Text("Apply to device") }
+}
+
+@Composable
+private fun SaveNetworkDialog(si: CompanionMessage.SelfInfo, onSave: (MeshNetwork) -> Unit, onDismiss: () -> Unit) {
+    var code by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save as network") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "%.3f MHz · %.1f kHz · SF%d · CR4/%d · %d dBm".format(
+                        si.radioFreqHz / 1_000_000.0, si.radioBwHz / 1000.0, si.radioSf, si.radioCr, si.txPower,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+                OutlinedTextField(code, { code = it.take(5) }, label = { Text("Code (≤5 chars)") }, singleLine = true)
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = code.isNotBlank(),
+                onClick = {
+                    onSave(
+                        MeshNetwork(
+                            code = code.trim(),
+                            name = name.trim().ifBlank { code.trim() },
+                            freqMhz = si.radioFreqHz / 1_000_000.0,
+                            bandwidthKhz = si.radioBwHz / 1000.0,
+                            spreadingFactor = si.radioSf,
+                            codingRate = si.radioCr,
+                            txPower = si.txPower,
+                        ),
+                    )
+                },
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 private fun transportLabel(kind: cz.meshcore.meshward.companion.CompanionTransportKind): String =

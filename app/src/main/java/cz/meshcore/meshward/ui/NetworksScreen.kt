@@ -30,10 +30,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -67,10 +65,9 @@ fun NetworksScreen(
     onOpenDetail: (String) -> Unit,
 ) {
     val networks by vm.networks.collectAsState()
-    val activeCode by vm.activeNetworkCode.collectAsState()
-    val auto by vm.networkAuto.collectAsState()
     val detected by vm.detectedNetworks.collectAsState()
     val activeNetwork by vm.activeNetwork.collectAsState()
+    val activeIsLocal by vm.activeNetworkIsLocal.collectAsState()
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     var refreshStatus by remember { mutableStateOf<String?>(null) }
@@ -107,27 +104,27 @@ fun NetworksScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Your device operates in one MeshCore Network at a time. It's auto-detected from nearby " +
-                    "bridge announces; turn that off to pin one manually. Radio parameters are shown for " +
-                    "reference and don't reconfigure the radio.",
+                "These are MeshCore Network definitions. Your device's active network is determined " +
+                    "automatically — set by a connected local companion radio, or detected from nearby " +
+                    "bridge announces. Radio parameters here are for reference and don't reconfigure a radio.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // Automatic detection toggle + what's currently detected.
+            // Read-only: which network is currently active and where it came from.
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Automatic", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "Detect the active network from nearby bridges",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Switch(checked = auto, onCheckedChange = { vm.setNetworkAuto(it) })
+                    Text("Active network", style = MaterialTheme.typography.titleSmall)
+                    val source = when {
+                        activeNetwork == null -> ""
+                        activeIsLocal -> " · from local companion"
+                        else -> " · detected nearby"
                     }
+                    Text(
+                        activeNetwork?.let { "${it.code} · ${it.name}$source" } ?: "None",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                     val detectedLabel = if (detected.isEmpty()) "No bridge detected nearby"
                     else "Detected: " + detected.joinToString(", ") { it.code }
                     Text(
@@ -135,13 +132,6 @@ fun NetworksScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (auto) {
-                        Text(
-                            activeNetwork?.let { "Active: ${it.code} · ${it.name}" } ?: "Active: none",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
                 }
             }
 
@@ -182,10 +172,8 @@ fun NetworksScreen(
             networks.forEach { net ->
                 NetworkRow(
                     net = net,
-                    // In auto mode no row is pinned; selecting one switches to manual (setActiveNetwork).
-                    selected = !auto && net.code == activeCode,
+                    isActive = net.code == activeNetwork?.code,
                     isBuiltin = vm.isBuiltinNetwork(net.code),
-                    onSelect = { vm.setActiveNetwork(net.code) },
                     onOpen = { onOpenDetail(net.code) },
                     onEdit = {
                         // Editing a built-in stores an editable custom copy under the same code.
@@ -213,19 +201,17 @@ fun NetworksScreen(
 @Composable
 private fun NetworkRow(
     net: MeshNetwork,
-    selected: Boolean,
+    isActive: Boolean,
     isBuiltin: Boolean,
-    onSelect: () -> Unit,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().padding(end = 4.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RadioButton(selected = selected, onClick = onSelect)
             Column(
                 Modifier.weight(1f).clickable(onClick = onOpen).padding(vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -233,6 +219,7 @@ private fun NetworkRow(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     NetworkCodeChip(net.code)
                     Text(net.name.ifBlank { net.code }, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    if (isActive) ActiveTag()
                     if (isBuiltin) BuiltinTag()
                 }
                 Text(
@@ -272,6 +259,7 @@ private fun NetworkEditForm(
     var bw by remember { mutableStateOf(if (initial.bandwidthKhz != 0.0) initial.bandwidthKhz.toString() else "") }
     var sf by remember { mutableStateOf(if (initial.spreadingFactor != 0) initial.spreadingFactor.toString() else "") }
     var cr by remember { mutableStateOf(if (initial.codingRate != 0) initial.codingRate.toString() else "") }
+    var txp by remember { mutableStateOf(if (initial.txPower != 0) initial.txPower.toString() else "") }
     var analyzers by remember { mutableStateOf(initial.analyzerUrls) }
     var mqtt by remember { mutableStateOf(initial.mqttEndpoints) }
     var geo by remember { mutableStateOf(initial.geoJson) }
@@ -341,6 +329,11 @@ private fun NetworkEditForm(
                     singleLine = true, label = { Text("Coding rate 4/N") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
+                OutlinedTextField(
+                    value = txp, onValueChange = { txp = it.filter(Char::isDigit).take(2) }, modifier = Modifier.weight(1f),
+                    singleLine = true, label = { Text("TX power (dBm)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
             }
 
             OutlinedTextField(
@@ -375,6 +368,7 @@ private fun NetworkEditForm(
                                 bandwidthKhz = bw.toDoubleOrNull() ?: 0.0,
                                 spreadingFactor = sf.toIntOrNull() ?: 0,
                                 codingRate = cr.toIntOrNull() ?: 0,
+                                txPower = txp.toIntOrNull() ?: 0,
                                 analyzerUrls = analyzers.trim(),
                                 mqttEndpoints = mqtt.trim(),
                                 geoJson = geo.trim(),
@@ -417,6 +411,15 @@ private fun BuiltinTag() {
         "built-in",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun ActiveTag() {
+    Text(
+        "active",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
     )
 }
 

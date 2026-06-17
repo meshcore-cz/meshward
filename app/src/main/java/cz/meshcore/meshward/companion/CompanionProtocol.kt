@@ -22,6 +22,8 @@ object CompanionProtocol {
     private const val CMD_GET_STATS: Byte = 56
     private const val CMD_SEND_SELF_ADVERT: Byte = 7
     private const val CMD_SET_ADVERT_NAME: Byte = 8
+    private const val CMD_SET_RADIO_PARAMS: Byte = 11
+    private const val CMD_SET_TX_POWER: Byte = 12
     private const val CMD_REBOOT: Byte = 19
     /** SEND_RAW_PACKET — transmit a pre-built OTA packet. Requires firmware PR #2543. */
     private const val CMD_SEND_RAW_PACKET: Byte = 65
@@ -82,7 +84,27 @@ object CompanionProtocol {
             packet.copyInto(it, 2)
         }
 
-    // --- write/identity helpers (not wired to UI this pass; verified-only on hardware) ---
+    /**
+     * SET_RADIO_PARAMS: `[11][freq(LE32)][bw(LE32)][sf][cr]`. Inputs are true Hz (as in [SelfInfo] and
+     * the app's network defs); the wire uses the device's raw units — frequency in kHz (MHz×1000) and
+     * bandwidth in Hz (kHz×1000) — so we divide the frequency by 1000 and pass bandwidth through.
+     * Firmware-derived layout; the device replies OK on success.
+     */
+    fun setRadioParams(freqHz: Long, bwHz: Long, sf: Int, cr: Int): ByteArray {
+        val rawFreq = freqHz / 1000
+        val buf = ByteArray(11)
+        buf[0] = CMD_SET_RADIO_PARAMS
+        le32(buf, 1, rawFreq)
+        le32(buf, 5, bwHz)
+        buf[9] = sf.toByte()
+        buf[10] = cr.toByte()
+        return buf
+    }
+
+    /** SET_TX_POWER: `[12][dbm]`. */
+    fun setTxPower(dbm: Int): ByteArray = byteArrayOf(CMD_SET_TX_POWER, dbm.toByte())
+
+    // --- write/identity helpers (not all wired to UI; firmware-derived, verify on hardware) ---
 
     /** SEND_SELF_ADVERT: `[7][type]` (0 = zero-hop, 1 = flood). */
     fun sendSelfAdvert(flood: Boolean): ByteArray = byteArrayOf(CMD_SEND_SELF_ADVERT, if (flood) 1 else 0)
@@ -125,14 +147,17 @@ object CompanionProtocol {
      */
     private fun decodeSelfInfo(b: ByteArray): CompanionMessage.SelfInfo {
         fun g(i: Int) = if (i < b.size) b[i].toInt() and 0xFF else 0
+        // The device packs both radio fields as (natural unit × 1000): radio_freq is MHz×1000 (i.e.
+        // kHz) and radio_bw is kHz×1000 (i.e. Hz). Normalise both to Hz here so callers never have to
+        // juggle the asymmetry. (e.g. raw 869432 → 869.432 MHz; raw 62500 → 62.5 kHz.)
         return CompanionMessage.SelfInfo(
             txPower = g(1),
             maxTxPower = g(2),
             publicKey = if (b.size >= 35) b.copyOfRange(3, 35).toHexLocal() else "",
             latitude = i32(b, 35) / 1e6,
             longitude = i32(b, 39) / 1e6,
-            radioFreqKHz = u32(b, 47),
-            radioBwKHz = u32(b, 51),
+            radioFreqHz = u32(b, 47) * 1000,
+            radioBwHz = u32(b, 51),
             radioSf = g(55),
             radioCr = g(56),
             name = if (b.size > 57) trimString(b, 57) else "",
@@ -231,6 +256,13 @@ object CompanionProtocol {
 
     private fun i32(b: ByteArray, i: Int): Int = u32(b, i).toInt()
 
+    private fun le32(b: ByteArray, i: Int, v: Long) {
+        b[i] = (v and 0xFF).toByte()
+        b[i + 1] = ((v shr 8) and 0xFF).toByte()
+        b[i + 2] = ((v shr 16) and 0xFF).toByte()
+        b[i + 3] = ((v shr 24) and 0xFF).toByte()
+    }
+
     private fun trimString(b: ByteArray, from: Int): String {
         var end = from
         while (end < b.size && b[end].toInt() != 0) end++
@@ -282,8 +314,8 @@ sealed class CompanionMessage {
         val publicKey: String,
         val latitude: Double,
         val longitude: Double,
-        val radioFreqKHz: Long,
-        val radioBwKHz: Long,
+        val radioFreqHz: Long,
+        val radioBwHz: Long,
         val radioSf: Int,
         val radioCr: Int,
         val name: String,

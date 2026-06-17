@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+/** How a companion's radio parameters are governed. */
+enum class CompanionRadioMode { AUTO, MANUAL }
+
 /**
  * Persisted per-companion configuration, keyed by [address] (a transport-qualified id, e.g.
  * `AA:BB:…` for BLE, `tcp:host:port`, or `usb:vid:pid`). [endpoint] is the transport-specific target
@@ -25,8 +28,18 @@ data class CompanionConfig(
     val enabled: Boolean = true,
     /** Forward packets between this radio and the nearby Sidepath mesh. */
     val bridgeEnabled: Boolean = true,
-    /** Network code to tag bridged packets with; blank = use the app's active network. */
-    val networkCodeOverride: String = "",
+    /**
+     * AUTO: the radio belongs to the chosen [radioNetworkCode]; verify the device's radio matches it
+     * on each connect and block bridging on mismatch. MANUAL: the user sets radio params explicitly,
+     * the radio has no network identity, and no verification is done.
+     */
+    val radioMode: CompanionRadioMode = CompanionRadioMode.AUTO,
+    /**
+     * This companion's MeshCore network in AUTO mode (ignored in MANUAL). Tags every bridged packet
+     * (SPMC carrier) and the ANNOUNCE [cz.meshcore.sidepath.protocol.BridgeAd], and is the network
+     * AUTO mode verifies the radio against. Blank in AUTO = no network chosen yet (packets untagged).
+     */
+    val radioNetworkCode: String = "",
 ) {
     /** The concrete target to dial; falls back to [address] (BLE MAC) when [endpoint] is unset. */
     val effectiveEndpoint: String get() = endpoint.ifBlank { address }
@@ -46,6 +59,12 @@ data class CompanionState(
     val bridgeTxCount: Long = 0,
     val lastBridgeActivityMs: Long = 0,
     val lastError: String = "",
+    /** AUTO mode: true when the device's radio doesn't match the enforced network, so bridging is off. */
+    val radioBlocked: Boolean = false,
+    /** Human-readable radio match status (set by the manager, which knows the network defs). */
+    val radioStatus: String = "",
+    /** Code of the known network the device's live radio params match, or blank if none/unknown. */
+    val matchedNetworkCode: String = "",
 ) {
     val address: String get() = config.address
     val displayName: String
@@ -123,9 +142,22 @@ class CompanionConnection(
         client.disconnect()
     }
 
-    /** Apply a config change (label / enabled / bridge / network override). */
+    /** Apply a config change (label / enabled / bridge / network / radio mode). */
     fun updateConfig(transform: (CompanionConfig) -> CompanionConfig) {
         _state.update { it.copy(config = transform(it.config)) }
+    }
+
+    /**
+     * Write radio parameters to the device (manual mode), then re-run APP_START so the refreshed
+     * [CompanionMessage.SelfInfo] reflects the new settings. Inputs are true Hz / dBm.
+     */
+    fun applyRadio(freqHz: Long, bwHz: Long, sf: Int, cr: Int, txPower: Int) {
+        client.send(CompanionProtocol.setRadioParams(freqHz, bwHz, sf, cr))
+        if (txPower > 0) client.send(CompanionProtocol.setTxPower(txPower))
+        scope.launch {
+            delay(300) // let the device apply before we re-read identity
+            client.send(CompanionProtocol.appStart())
+        }
     }
 
     /** Put a raw OTA packet on this radio via SEND_RAW_PACKET. Returns false if not ready. */
