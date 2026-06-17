@@ -54,6 +54,7 @@ private sealed class Dest(val depth: Int) {
     data object Networks : Dest(2)
     data object About : Dest(2)
     data object Debug : Dest(2)
+    data object MeshCompanion : Dest(2)
     data object ConnectionLog : Dest(3)
     data object ManageIdentities : Dest(1)
     data class Conversation(val peer: String) : Dest(1)
@@ -92,6 +93,7 @@ private sealed class Dest(val depth: Int) {
             key == "Networks" -> Networks
             key == "About" -> About
             key == "Debug" -> Debug
+            key == "MeshCompanion" -> MeshCompanion
             key == "ConnectionLog" -> ConnectionLog
             key == "ManageIdentities" -> ManageIdentities
             else -> Tabs
@@ -207,7 +209,9 @@ fun ChatRoot(vm: ChatViewModel) {
                 onOpenAbout = { push(Dest.About) },
                 onOpenDebug = { push(Dest.Debug) },
                 onOpenNetworks = { push(Dest.Networks) },
+                onOpenCompanion = { push(Dest.MeshCompanion) },
             )
+            Dest.MeshCompanion -> CompanionScreen(vm, onBack = popTop)
             Dest.Networks -> NetworksScreen(
                 vm,
                 onBack = popTop,

@@ -54,6 +54,8 @@ dependencies {
     // Paging 3: page chat history / discovered contacts from Room instead of loading whole lists.
     implementation "androidx.paging:paging-runtime:3.3.6"
     implementation "androidx.paging:paging-compose:3.3.6"
+    // USB serial drivers (CDC-ACM / FTDI / CP210x / CH34x) for a wired MeshCore companion.
+    implementation "com.github.mik3y:usb-serial-for-android:3.8.1"
     // QR codes: generate (zxing core) + scan MeshCore URIs (zxing-android-embedded).
     implementation "com.google.zxing:core:3.5.3"
     implementation "com.journeyapps:zxing-android-embedded:4.3.0"

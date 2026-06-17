@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Public
@@ -66,7 +67,9 @@ fun SettingsScreen(
     onOpenAbout: () -> Unit = {},
     onOpenDebug: () -> Unit = {},
     onOpenNetworks: () -> Unit = {},
+    onOpenCompanion: () -> Unit = {},
 ) {
+    val companions by vm.companions.collectAsState()
     val seedHex by vm.seedHex.collectAsState()
     val activeNetwork by vm.activeNetwork.collectAsState()
     val description by vm.description.collectAsState()
@@ -160,6 +163,37 @@ fun SettingsScreen(
                         Text(
                             activeNetwork?.let { "Active: ${it.code} · ${it.name}" }
                                 ?: "Choose your regional network",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // Local MeshCore Companion (direct BLE radio + packet bridge)
+            Card(
+                Modifier.fillMaxWidth().clickable(onClick = onOpenCompanion),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Bluetooth, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.size(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Local MeshCore Companion", style = MaterialTheme.typography.titleMedium)
+                        val connected = companions.count { it.link == cz.meshcore.meshward.companion.CompanionLinkState.READY }
+                        Text(
+                            when {
+                                companions.isEmpty() -> "Connect a MeshCore radio over Bluetooth"
+                                connected > 0 -> "$connected of ${companions.size} connected"
+                                else -> "${companions.size} configured · disconnected"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

@@ -22,6 +22,10 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
+import cz.meshcore.meshward.companion.CompanionManager
+import cz.meshcore.meshward.companion.CompanionScanResult
+import cz.meshcore.meshward.companion.CompanionState
+import cz.meshcore.meshward.companion.CompanionUsbDevice
 import cz.meshcore.meshward.data.Channel
 import cz.meshcore.meshward.data.ChannelKind
 import cz.meshcore.meshward.data.ChatDatabase
@@ -875,17 +879,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             displayName(peerHex, c.associateBy { it.nodeHex }, t)
         }.stateIn(viewModelScope, SharingStarted.Eagerly, shortHex(peerHex))
 
+    // ---- local MeshCore companion (BLE) --------------------------------------
+
+    /** Manages locally-attached MeshCore companion radios and the radio↔mesh packet bridge. */
+    val companionManager = CompanionManager(app, viewModelScope)
+    val companions: StateFlow<List<CompanionState>> = companionManager.companions
+    val companionScanResults: StateFlow<List<CompanionScanResult>> = companionManager.scanResults
+    val companionScanning: StateFlow<Boolean> = companionManager.scanning
+
+    fun companionStartScan() = companionManager.startScan()
+    fun companionStopScan() = companionManager.stopScan()
+    fun companionAdd(address: String, label: String = "") = companionManager.addAndConnect(address, label)
+    fun companionAddTcp(host: String, port: Int, label: String = "") = companionManager.addTcp(host, port, label)
+    fun companionAddUsb(key: String, label: String = "") = companionManager.addUsb(key, label)
+    fun companionUsbDevices(): List<CompanionUsbDevice> = companionManager.usbDevices()
+    fun companionConnect(address: String) = companionManager.connect(address)
+    fun companionDisconnect(address: String) = companionManager.disconnect(address)
+    fun companionForget(address: String) = companionManager.forget(address)
+    fun companionSetBridge(address: String, enabled: Boolean) = companionManager.setBridgeEnabled(address, enabled)
+    fun companionSetLabel(address: String, label: String) = companionManager.setLabel(address, label)
+
     // ---- service lifecycle ---------------------------------------------------
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val service = (binder as SidepathService.LocalBinder).getService()
             _service.value = service
+            companionManager.attachService(service)
             viewModelScope.launch { initializeService(service) }
             observeIncoming(service)
         }
         override fun onServiceDisconnected(name: ComponentName) {
             _service.value = null
+            companionManager.attachService(null)
             serviceBound = false
         }
     }
@@ -1014,6 +1040,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (lat != null && lon != null) _userLocation.value = UserLocation(lat, lon)
             // Refresh in the background if the user has location on and the permission is still held.
             if (_locationEnabled.value) refreshLocation()
+        }
+        // Keep the companion bridge tagging packets with the app's active MeshCore network.
+        viewModelScope.launch {
+            activeNetwork.collect { companionManager.setActiveNetworkCode(it?.code ?: "") }
         }
         // Drop discovered contacts whose TTL has elapsed so the table doesn't grow unbounded.
         viewModelScope.launch {
@@ -2540,6 +2570,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // The UI is going away — hand notification duty back to the headless fallback so messages that
         // arrive while the app is task-killed still notify (the foreground service keeps running).
         MeshwardNotifier.uiAlive = false
+        companionManager.shutdown()
         if (serviceBound) {
             runCatching { getApplication<Application>().unbindService(serviceConnection) }
             serviceBound = false

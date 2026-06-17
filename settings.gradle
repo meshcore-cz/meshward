@@ -16,6 +16,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // usb-serial-for-android (CDC-ACM / FTDI / CP210x / CH34x drivers) is published on JitPack.
+        maven { url 'https://jitpack.io' }
     }
 }
 rootProject.name = "Meshward"

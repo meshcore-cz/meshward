@@ -22,6 +22,9 @@
         android:name="android.permission.ACCESS_FINE_LOCATION"
         tools:remove="android:maxSdkVersion" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
+    <!-- USB host is used only to connect a wired MeshCore companion radio; optional so devices
+         without USB host still install. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <application
         android:name="cz.meshcore.meshward.ChatApp"
         android:label="Meshward"
