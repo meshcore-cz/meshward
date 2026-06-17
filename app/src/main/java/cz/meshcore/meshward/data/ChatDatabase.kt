@@ -6,18 +6,24 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import cz.meshcore.meshward.outpost.storage.OutpostBoardEntity
+import cz.meshcore.meshward.outpost.storage.OutpostDao
+import cz.meshcore.meshward.outpost.storage.OutpostIdentityEntity
+import cz.meshcore.meshward.outpost.storage.OutpostListingEntity
+import cz.meshcore.meshward.outpost.storage.OutpostObjectEntity
 
 // v3: NodeIDs widened 8→10 bytes (protocol v3), so old peer/contact ids are stale —
 // destructive migration wipes the v2 store. See docs/PROTOCOL.md migration §17.
 @Database(
-    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, MeshCorePath::class, NodeAnnouncement::class, MeshNetwork::class, ConversationPref::class],
-    version = 25,
+    entities = [Message::class, Contact::class, Channel::class, DiscoveredContact::class, Reaction::class, Echo::class, MeshCoreHeard::class, MeshCorePath::class, NodeAnnouncement::class, MeshNetwork::class, ConversationPref::class, OutpostObjectEntity::class, OutpostBoardEntity::class, OutpostIdentityEntity::class, OutpostListingEntity::class],
+    version = 27,
     exportSchema = false,
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun messageDao(): MessageDao
     abstract fun exploreDao(): ExploreDao
+    abstract fun outpostDao(): OutpostDao
 
     companion object {
         // One open instance per database file — each identity (profile) has its own file, so the
@@ -230,12 +236,63 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        // v25→v26: add the Outpost store — signed community objects, board subscriptions, and the
+        // author-identity cache. Additive — migrate in place so chats/contacts/networks are kept.
+        private val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `outpost_objects` (" +
+                        "`objectIdHex` TEXT NOT NULL, `fullHashHex` TEXT NOT NULL, `boardId` TEXT NOT NULL, " +
+                        "`authorRef` TEXT NOT NULL, `listingKey` TEXT NOT NULL, `listingId` INTEGER NOT NULL, " +
+                        "`revision` INTEGER NOT NULL, `objectType` INTEGER NOT NULL, `profile` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `verification` INTEGER NOT NULL, " +
+                        "`conflicted` INTEGER NOT NULL, `receivedAtMs` INTEGER NOT NULL, `sourceTransport` TEXT NOT NULL, " +
+                        "`signedHex` TEXT NOT NULL, PRIMARY KEY(`objectIdHex`))",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_objects_boardId` ON `outpost_objects` (`boardId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_objects_listingKey` ON `outpost_objects` (`listingKey`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_objects_authorRef` ON `outpost_objects` (`authorRef`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_objects_verification` ON `outpost_objects` (`verification`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `outpost_boards` (" +
+                        "`boardId` TEXT NOT NULL, `channelPskHex` TEXT NOT NULL, `name` TEXT NOT NULL, " +
+                        "`subscribedAtMs` INTEGER NOT NULL, `lastSyncMs` INTEGER NOT NULL, PRIMARY KEY(`boardId`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `outpost_identities` (" +
+                        "`pubKeyHex` TEXT NOT NULL, `authorRef` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+                        "`updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`pubKeyHex`))",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_identities_authorRef` ON `outpost_identities` (`authorRef`)")
+            }
+        }
+
+        // v26→v27: add the denormalized `outpost_listings` table — one ready-to-render row per
+        // listing, so the board UI reads a simple ordered query instead of re-deriving every object.
+        // Additive; the table is rebuilt from the existing objects on first ingest/maintenance.
+        private val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `outpost_listings` (" +
+                        "`listingKey` TEXT NOT NULL, `boardId` TEXT NOT NULL, `headObjectIdHex` TEXT NOT NULL, " +
+                        "`revision` INTEGER NOT NULL, `authorRefHex` TEXT NOT NULL, `authorPubKeyHex` TEXT NOT NULL, " +
+                        "`isMine` INTEGER NOT NULL, `verified` INTEGER NOT NULL, `closed` INTEGER NOT NULL, " +
+                        "`closeReasonCode` INTEGER NOT NULL, `conflicted` INTEGER NOT NULL, `categoryCode` INTEGER NOT NULL, " +
+                        "`currency` TEXT NOT NULL, `price` INTEGER NOT NULL, `description` TEXT NOT NULL, " +
+                        "`priceLabel` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, " +
+                        "`sourceTransport` TEXT NOT NULL, PRIMARY KEY(`listingKey`))",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_listings_boardId` ON `outpost_listings` (`boardId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outpost_listings_createdAt` ON `outpost_listings` (`createdAt`)")
+            }
+        }
+
         fun get(context: Context, dbName: String = "meshward.db"): ChatDatabase = synchronized(this) {
             instances[dbName] ?: Room.databaseBuilder(
                 context.applicationContext,
                 ChatDatabase::class.java,
                 dbName,
-            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25)
+            ).addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27)
                 .fallbackToDestructiveMigration()
                 .build().also { instances[dbName] = it }
         }

@@ -694,6 +694,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         dao.channels().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
+     * Outpost community layer (signed boards / posts). Owns its own repository, storage and transport
+     * coordination; the UI binds to [OutpostController] flows. Identity resolution reuses our
+     * contacts / topology / discovered tables, so any node we already know is immediately verifiable.
+     */
+    val outpost: cz.meshcore.meshward.outpost.OutpostController by lazy {
+        cz.meshcore.meshward.outpost.OutpostController(
+            scope = viewModelScope,
+            dao = db.outpostDao(),
+            contacts = contacts,
+            topology = topology,
+            discovered = discoveredContacts,
+            channels = channels,
+            seedHex = seedHex,
+            sidepathReachable = connectedPeers
+                .map { it.isNotEmpty() }
+                .stateIn(viewModelScope, SharingStarted.Eagerly, false),
+            meshCoreReachable = combine(meshCoreEnabled, activeNetwork) { enabled, net -> enabled && net != null }
+                .stateIn(viewModelScope, SharingStarted.Eagerly, false),
+            // Sidepath: flood the frame as a native OUTPOST datagram (works without MeshCore).
+            sidepathSend = { frame -> _service.value?.sendOutpost(frame) },
+            // MeshCore: wrap the frame in a channel-encrypted GRP_DATA group datagram (data_type
+            // 0x504F = "OP") and send it the same way channel chat reaches MeshCore — via the radio
+            // sink / a gateway. Uses current MeshCore protocol features; no firmware change.
+            meshCoreSend = { psk, frame ->
+                _service.value?.let { svc ->
+                    cz.meshcore.sidepath.meshcore.MeshCoreCodec.encodeGrpData(psk, 0x504F, frame)
+                        ?.let { svc.sendMeshCoreRaw(it) }
+                }
+            },
+        )
+    }
+
+    /**
      * Per-conversation notification mode, keyed by peerHex. A peer with no stored pref defaults to
      * [NotifMode.ALL]; the auto-joined Public channel is seeded to [NotifMode.MENTIONS] (see
      * [ensurePublicChannel]). Drives both the notify decision and the muted-bell UI in the chat list.
@@ -1053,6 +1086,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // The rich, foreground notification path is this ViewModel; tell the headless fallback to
         // stand down while we're alive (re-armed in onCleared when the UI goes away).
         MeshwardNotifier.uiAlive = true
+        // Construct the Outpost controller now (it is otherwise lazy) so its warm post flow starts
+        // deriving the board at startup — the tab then opens instantly instead of warming on first visit.
+        outpost.warmUp()
         // Load display preferences early so the theme/avatars are right before the service binds.
         viewModelScope.launch {
             migrateLegacyPrefsIfNeeded()
@@ -1670,6 +1706,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val idHex = bridgedId.toHex()
             if (!processed.add("bridged:$idHex")) return
             messageDao.markBridgedToMeshCore(idHex, msg.bridgedByNodeId?.toHex() ?: "")
+            return
+        }
+        // Outpost frame (signed object or sync control) carried over Sidepath or MeshCore. Hand it to
+        // the Outpost layer, which verifies and stores objects and answers sync requests.
+        msg.outpostPayload?.let { payload ->
+            if (!processed.add("op:" + msg.datagramId.toHex())) return
+            if (msg.fromMeshCore) outpost.deliverFromMeshCore(payload) else outpost.deliverFromSidepath(payload)
             return
         }
         if (msg.protocol == PayloadProtocol.SIDEPATH_CONTROL && msg.traceResponse != null) {

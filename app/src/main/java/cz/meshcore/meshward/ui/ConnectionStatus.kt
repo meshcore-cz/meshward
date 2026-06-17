@@ -17,7 +17,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Hub
-import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -60,6 +59,7 @@ data class MeshNav(
     val openProfile: (String) -> Unit = {},
     val openCompanions: () -> Unit = {},
     val openNetworkDetail: (String) -> Unit = {},
+    val openSidepath: () -> Unit = {},
 )
 
 val LocalMeshNav = staticCompositionLocalOf { MeshNav() }
@@ -195,15 +195,14 @@ private fun SidepathSection(vm: ChatViewModel, nav: MeshNav, onDismiss: () -> Un
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val traceTarget = peers.firstOrNull { !it.degraded }?.nodeId?.toHex().orEmpty()
             FilledTonalButton(
-                onClick = { onDismiss(); nav.openTrace(traceTarget) },
+                onClick = { onDismiss(); nav.openSidepath() },
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                Icon(Icons.Default.Route, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Trace")
+                Text("Sidepath")
             }
             OutlinedButton(
                 onClick = { onDismiss(); nav.openRxLog() },

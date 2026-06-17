@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -57,6 +57,8 @@ private sealed class Dest(val depth: Int) {
     data object MeshCompanion : Dest(2)
     data object ConnectionLog : Dest(3)
     data object ManageIdentities : Dest(1)
+    // The Sidepath mesh view, now reached from the connection-status sheet rather than a tab.
+    data object Sidepath : Dest(1)
     data class Conversation(val peer: String) : Dest(1)
     data class Profile(val peer: String) : Dest(2)
     data class NetworkDetail(val code: String) : Dest(2)
@@ -96,6 +98,7 @@ private sealed class Dest(val depth: Int) {
             key == "MeshCompanion" -> MeshCompanion
             key == "ConnectionLog" -> ConnectionLog
             key == "ManageIdentities" -> ManageIdentities
+            key == "Sidepath" -> Sidepath
             else -> Tabs
         }
     }
@@ -170,6 +173,7 @@ fun ChatRoot(vm: ChatViewModel) {
             openProfile = { push(Dest.Profile(it)) },
             openCompanions = { push(Dest.MeshCompanion) },
             openNetworkDetail = { push(Dest.NetworkDetail(it)) },
+            openSidepath = { push(Dest.Sidepath) },
         ),
     ) {
     AnimatedContent(
@@ -243,6 +247,12 @@ fun ChatRoot(vm: ChatViewModel) {
                 onBack = popTop,
                 onOpenProfile = { push(Dest.Profile(it)) },
             )
+            Dest.Sidepath -> NetworkScreen(
+                vm,
+                onOpenProfile = { push(Dest.Profile(it)) },
+                onOpenSettings = { push(Dest.Settings) },
+                onBack = popTop,
+            )
             Dest.About -> AboutScreen(onBack = popTop)
             Dest.Debug -> DebugScreen(vm, onBack = popTop, onOpenConnectionLog = { push(Dest.ConnectionLog) })
             Dest.ConnectionLog -> ConnectionLogScreen(vm, onBack = popTop)
@@ -307,8 +317,8 @@ private fun TabsScaffold(
                 NavigationBarItem(
                     selected = tab == 2,
                     onClick = { onSelectTab(2) },
-                    icon = { Icon(Icons.Default.Hub, contentDescription = "Sidepath") },
-                    label = { Text("Sidepath") },
+                    icon = { Icon(Icons.Default.Storefront, contentDescription = "Outpost") },
+                    label = { Text("Outpost") },
                 )
             }
         },
@@ -331,10 +341,12 @@ private fun TabsScaffold(
                     onOpenAbout = onOpenAbout,
                     onOpenNetworkDetail = onOpenNetworkDetail,
                 )
-                else -> NetworkScreen(
+                else -> OutpostScreen(
                     vm,
+                    onOpenConversation = onOpenConversation,
                     onOpenProfile = onOpenProfile,
                     onOpenSettings = onOpenSettings,
+                    onOpenAbout = onOpenAbout,
                 )
             }
         }

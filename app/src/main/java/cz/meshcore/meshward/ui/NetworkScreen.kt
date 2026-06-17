@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Route
@@ -22,6 +23,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -55,6 +57,7 @@ fun NetworkScreen(
     vm: ChatViewModel,
     onOpenProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
     val peers by vm.connectedPeers.collectAsState()
     val topology by vm.topology.collectAsState()
@@ -73,6 +76,11 @@ fun NetworkScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Sidepath") },
+                navigationIcon = {
+                    if (onBack != null) IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 actions = {
                     // Start/stop the mesh radio right from the page header.
                     Text(
