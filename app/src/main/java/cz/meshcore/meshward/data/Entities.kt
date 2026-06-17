@@ -291,4 +291,9 @@ data class Message(
     // so the round-trip delay and the ACK packet detail survive an app restart.
     val ackPacketHex: String = "",
     val ackTimestampMs: Long = 0L,
+    // For a DM reply (the text carries a hidden `#[hash]` binding): the resolved quoted message,
+    // denormalized at ingest so the quote always renders even if the original isn't currently loaded.
+    // Blank for non-replies and replies whose target wasn't found locally.
+    val replyToSender: String = "",
+    val replyToText: String = "",
 )

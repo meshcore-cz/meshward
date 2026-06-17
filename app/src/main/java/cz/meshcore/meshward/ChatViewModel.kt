@@ -1770,6 +1770,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (peerHex in _typingPeers.value) _typingPeers.value = _typingPeers.value - peerHex
     }
 
+    /**
+     * If [text] carries a hidden `#[hash]` reply binding, resolve the quoted message among the
+     * conversation's recent messages and denormalize its sender + snippet onto the stored reply
+     * [messageId], so the quote always renders without re-finding the original in the paged list.
+     */
+    private suspend fun applyReplyQuote(messageId: String, peerHex: String, text: String) {
+        val ref = replyRefOf(text) ?: return
+        val target = messageDao.recentMessages(peerHex, 400)
+            .firstOrNull { it.id != messageId && replyHashOf(it.text) == ref } ?: return
+        val sender = if (target.incoming) nameForHex(peerHex) else "You"
+        messageDao.setReplyQuote(messageId, sender, stripReplyTag(target.text))
+    }
+
     private suspend fun handleIncomingDm(msg: ReceivedMessage) {
         val peer = msg.fromNodeId.toHex()
         // A bridged MeshCore DM arrives over several LoRa/Sidepath paths as distinct carrier datagrams
@@ -1807,6 +1820,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 rssi = msg.rssi,
             )
         )
+        applyReplyQuote(id, peer, msg.text ?: "")
         // The service verified the sender (MeshCore MAC, or outer.source == sender_public_key[:10] for
         // native DMs); save the sender's key so we can reply even if it's not (yet) in our topology.
         learnContact(peer, msg.senderPublicKey, isMeshCore = msg.fromMeshCore)
@@ -2206,9 +2220,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     path = pathBytes,
                     pathHashSize = learnedPath?.pathHashSize ?: 0,
                 )
+                val msgId = id?.toHex() ?: newId()
                 messageDao.insertMessage(
                     Message(
-                        id = id?.toHex() ?: newId(),
+                        id = msgId,
                         peerHex = peerHex,
                         senderHex = nodeId.value.toHex(),
                         incoming = false,
@@ -2220,15 +2235,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         packetHex = id?.let { service.originatedPacketHex(it.toHex()) }.orEmpty(),
                     )
                 )
+                applyReplyQuote(msgId, peerHex, body)
                 return@launch
             }
             val dst = NodeId.fromHex(peerHex)
             // Resolve the recipient's key from the saved contact (learned from a received DM
             // or the picker), falling back to topology inside the service.
             val id = service.sendChat(body, dst, pub, floodTtl = _floodTtl.value)
+            val msgId = id?.toHex() ?: newId()
             messageDao.insertMessage(
                 Message(
-                    id = id?.toHex() ?: newId(),
+                    id = msgId,
                     peerHex = peerHex,
                     senderHex = nodeId.value.toHex(),
                     incoming = false,
@@ -2238,6 +2255,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     packetHex = id?.let { service.originatedPacketHex(it.toHex()) }.orEmpty(),
                 )
             )
+            applyReplyQuote(msgId, peerHex, body)
         }
     }
 
@@ -2383,6 +2401,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * Deletes a conversation. For a direct chat this also removes the contact, so it disappears
      * from Chats entirely (it can be re-discovered in Explore); channel history is just cleared.
      */
+    /**
+     * Re-sends an outgoing message's exact original packet (same id, content and signatures) to the
+     * mesh, so peers that missed it can still receive it. Returns true if it was retransmitted.
+     */
+    fun rebroadcastMessage(msg: Message): Boolean {
+        val raw = msg.packetHex.takeIf { it.length >= 2 }?.runCatching { hexToBytes() }?.getOrNull() ?: return false
+        val service = _service.value ?: return false
+        return service.rebroadcast(raw)
+    }
+
+    /** Deletes one message from local storage only — it remains on the network and other devices. */
+    fun deleteMessage(id: String) {
+        viewModelScope.launch {
+            dao.deleteReactionsForMessage(id)
+            messageDao.deleteMessage(id)
+        }
+    }
+
     fun deleteChat(peerHex: String) {
         viewModelScope.launch {
             dao.deleteReactionsForPeer(peerHex)

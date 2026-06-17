@@ -73,6 +73,14 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     suspend fun messageById(id: String): Message?
 
+    /** Recent messages in a conversation — scanned to resolve a reply's `#[hash]` to its target. */
+    @Query("SELECT * FROM messages WHERE peerHex = :peer ORDER BY timestampMs DESC LIMIT :limit")
+    suspend fun recentMessages(peer: String, limit: Int): List<Message>
+
+    /** Store a reply's resolved quoted message (denormalized at ingest). */
+    @Query("UPDATE messages SET replyToSender = :sender, replyToText = :text WHERE id = :id")
+    suspend fun setReplyQuote(id: String, sender: String, text: String)
+
     @Query("UPDATE messages SET status = :status, routeHex = :route WHERE id = :id")
     suspend fun updateDelivery(id: String, status: Int, route: String)
 
@@ -97,4 +105,8 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE peerHex = :peer")
     suspend fun deleteMessagesFor(peer: String)
+
+    /** Delete a single message locally (it stays on the network / other devices). */
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteMessage(id: String)
 }

@@ -87,13 +87,15 @@ object MeshwardNotifier {
         if (!canPost(context)) return
         createChannel(context)
 
+        // Show the human-readable message: hidden reply tags stripped, @[Name] mentions flattened.
+        val shown = cz.meshcore.meshward.messagePreview(text)
         val convo = convos.getOrPut(peerHex) { Convo(conversationTitle, isGroup) }
         val sender = Person.Builder()
             .setName(senderName)
             .setKey(senderKey.ifBlank { senderName })
             .setIcon(IconCompat.createWithBitmap(senderAvatar))
             .build()
-        convo.lines.addLast(Line(sender, text, timeMs, senderAvatar))
+        convo.lines.addLast(Line(sender, shown, timeMs, senderAvatar))
         while (convo.lines.size > MAX_LINES) convo.lines.removeFirst()
 
         pushShortcut(context, peerHex, conversationTitle, sender, senderAvatar)

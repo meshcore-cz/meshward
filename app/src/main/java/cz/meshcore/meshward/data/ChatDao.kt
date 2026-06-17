@@ -88,6 +88,9 @@ interface ChatDao {
     @Query("DELETE FROM reactions WHERE messageId IN (SELECT id FROM messages WHERE peerHex = :peer)")
     suspend fun deleteReactionsForPeer(peer: String)
 
+    @Query("DELETE FROM reactions WHERE messageId = :messageId")
+    suspend fun deleteReactionsForMessage(messageId: String)
+
     // ---- echoes (persisted flood/MeshCore echoes of our own messages) ----
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertEcho(echo: Echo)

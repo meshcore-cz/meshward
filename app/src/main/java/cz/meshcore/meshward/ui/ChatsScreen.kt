@@ -291,10 +291,11 @@ internal fun ChatRow(
                     )
                 }
             }
+            val preview = cz.meshcore.meshward.messagePreview(item.lastText)
             val subtitle = when {
-                item.lastText.isBlank() -> "No messages yet"
-                item.isChannel && item.lastSender.isNotBlank() -> "${item.lastSender}: ${item.lastText}"
-                else -> item.lastText
+                preview.isBlank() -> "No messages yet"
+                item.isChannel && item.lastSender.isNotBlank() -> "${item.lastSender}: $preview"
+                else -> preview
             }
             Text(
                 subtitle,

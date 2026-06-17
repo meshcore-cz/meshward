@@ -224,31 +224,6 @@ fun ExploreScreen(
                     modifier = Modifier.padding(padding),
                 )
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                val activeNet = activeNetwork
-                if (activeNet != null) {
-                    val bridgeCount = topology.count { e -> e.bridges.any { it.code == activeNet.code } }
-                    item {
-                        ActiveNetworkCard(
-                            code = activeNet.code,
-                            name = activeNet.name,
-                            summary = networkRadioSummary(activeNet),
-                            local = activeNetworkIsLocal,
-                            bridgeCount = bridgeCount,
-                            packetCount = meshCoreTotal,
-                            lastPacketAtMs = lastMeshCorePacketAtMs,
-                            nowMs = nowMs,
-                            onClick = { onOpenNetworkDetail(activeNet.code) },
-                        )
-                    }
-                } else if (isRunning && meshCoreTrafficSeen) {
-                    // Real MeshCore packets have arrived this session but none could be attributed to a
-                    // network (no bridge advertised one, no carrier tag) — surface it as "Unknown
-                    // network". Keyed on live traffic only (not persisted discovered contacts, which
-                    // would wrongly show it at startup), and only while the mesh is on.
-                    item {
-                        UnknownNetworkCard(onClick = { onOpenNetworkDetail(cz.meshcore.meshward.UNKNOWN_NETWORK_CODE) })
-                    }
-                }
                 if (showLocationBanner) {
                     item {
                         LocationOptInBanner(

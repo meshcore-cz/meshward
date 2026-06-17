@@ -7,6 +7,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Notifications
@@ -70,6 +72,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Text
@@ -91,6 +95,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -107,6 +113,10 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cz.meshcore.meshward.ChatViewModel
+import cz.meshcore.meshward.replyHashOf
+import cz.meshcore.meshward.replyRefOf
+import cz.meshcore.meshward.stripReplyTag
+import cz.meshcore.meshward.withReplyTag
 import cz.meshcore.meshward.NOTE_TO_SELF
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -139,6 +149,15 @@ fun ConversationScreen(
     val lazyMessages = messageFlow.collectAsLazyPagingItems()
     val profile by remember(peerHex) { vm.profileFor(peerHex) }.collectAsState()
     var draft by remember { mutableStateOf(TextFieldValue("")) }
+    // Reply state. Channels reply by inserting an @mention; DMs bind to a specific message via a
+    // hidden `#[hash]` tag and show this quote bar above the composer. [inputFocus] lets a Reply tap
+    // jump the keyboard straight into the input.
+    val inputFocus = remember { FocusRequester() }
+    var replyTarget by remember { mutableStateOf<Message?>(null) }
+    // Resolve a reply tag → the quoted message, from the messages currently loaded.
+    val replyIndex = remember(lazyMessages.itemSnapshotList) {
+        lazyMessages.itemSnapshotList.items.associateBy { replyHashOf(it.text) }
+    }
     var detailsFor by remember { mutableStateOf<Message?>(null) }
     // Message the long-press actions sheet is open for, and (separately) one whose reaction we're
     // picking a non-quick emoji for via the full picker.
@@ -160,11 +179,13 @@ fun ConversationScreen(
         }
     }
     val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
     var menuOpen by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
     var showEmoji by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmDeleteChat by remember { mutableStateOf(false) }
+    var confirmDeleteMsg by remember { mutableStateOf<Message?>(null) }
     // A tapped @mention / declared sender that doesn't match any saved contact.
     var unknownMention by remember { mutableStateOf<String?>(null) }
 
@@ -229,6 +250,7 @@ fun ConversationScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -403,8 +425,16 @@ fun ConversationScreen(
                         draft = TextFieldValue(t, TextRange(t.length))
                     }
                 }
+                replyTarget?.let { rt ->
+                    ReplyPreviewBar(
+                        senderName = if (!rt.incoming) "You" else rt.senderName.ifBlank { profile.name.ifBlank { "Them" } },
+                        snippet = stripReplyTag(rt.text),
+                        onCancel = { replyTarget = null },
+                    )
+                }
                 MessageInput(
                     value = draft,
+                    focusRequester = inputFocus,
                     onChange = { newValue ->
                         // A real user edit in the input box: only now do we emit a "typing"
                         // hint (DMs only), and only when the text actually changed to non-blank.
@@ -420,9 +450,15 @@ fun ConversationScreen(
                     onSend = {
                         val text = draft.text
                         if (text.isNotBlank()) {
-                            if (isChannel) vm.sendChannelMessage(channelPskHexOf(peerHex), text)
-                            else vm.sendChat(peerHex, text)
+                            if (isChannel) {
+                                vm.sendChannelMessage(channelPskHexOf(peerHex), text)
+                            } else {
+                                // DM reply: prepend the hidden binding tag referencing the quoted message.
+                                val outgoing = replyTarget?.let { withReplyTag(text, it.text) } ?: text
+                                vm.sendChat(peerHex, outgoing)
+                            }
                             draft = TextFieldValue("")
+                            replyTarget = null
                             vm.stopTyping(peerHex) // a real message supersedes the typing hint
                         }
                     },
@@ -558,6 +594,7 @@ fun ConversationScreen(
                         showAvatar = showAvatar,
                         senderIdenticonKey = matchedHex,
                         mentionResolved = { name -> resolveName(name) != null },
+                        quoted = if (isChannel) null else replyRefOf(msg.text)?.let { replyIndex[it] },
                         onChipClick = { emoji -> reactionsEmoji = emoji; reactionsFor = msg },
                         onLongPress = { actionsFor = msg },
                         onClick = { detailsFor = msg },
@@ -623,13 +660,56 @@ fun ConversationScreen(
                 if (lazyMessages.peek(0)?.id == msg.id) scope.launch { listState.animateScrollToItem(0) }
             },
             onMoreEmoji = { actionsFor = null; emojiReactFor = msg },
+            onReply = {
+                actionsFor = null
+                if (isChannel) {
+                    // Channels: just drop an @mention of the author into the input and let the user type.
+                    val name = msg.senderName.ifBlank { msg.senderHex.take(8) }
+                    val lead = draft.text.let { if (it.isEmpty() || it.endsWith(" ")) it else "$it " }
+                    val t = "$lead@[$name] "
+                    draft = TextFieldValue(t, TextRange(t.length))
+                } else {
+                    // DMs: bind the next message to this one (the hidden tag is added on send).
+                    replyTarget = msg
+                }
+                inputFocus.requestFocus()
+            },
             onCopy = {
-                clipboard.setText(AnnotatedString(msg.text))
+                clipboard.setText(AnnotatedString(stripReplyTag(msg.text)))
                 Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                 actionsFor = null
             },
+            onRebroadcast = {
+                actionsFor = null
+                val ok = vm.rebroadcastMessage(msg)
+                scope.launch {
+                    snackbar.showSnackbar(if (ok) "Message rebroadcast to the mesh" else "Couldn't rebroadcast — no packet to resend")
+                }
+            },
             onInfo = { actionsFor = null; detailsFor = msg },
+            onDelete = {
+                actionsFor = null
+                // Note to Self is local-only, so deletion is real — no caveat needed. Everywhere else,
+                // a message can't be unsent, so confirm that we're only deleting our local copy.
+                if (isSelf) vm.deleteMessage(msg.id) else confirmDeleteMsg = msg
+            },
             onDismiss = { actionsFor = null },
+        )
+    }
+    confirmDeleteMsg?.let { m ->
+        AlertDialog(
+            onDismissRequest = { confirmDeleteMsg = null },
+            title = { Text("Delete message?") },
+            text = {
+                Text(
+                    "Messages can't be unsent. This removes the message from this device only — copies " +
+                        "already delivered stay on the network and on other devices.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.deleteMessage(m.id); confirmDeleteMsg = null }) { Text("Delete for me") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteMsg = null }) { Text("Cancel") } },
         )
     }
     emojiReactFor?.let { msg ->
@@ -759,10 +839,16 @@ private fun MessageActionsSheet(
     msg: Message,
     onReact: (String) -> Unit,
     onMoreEmoji: () -> Unit,
+    onReply: () -> Unit,
+    onRebroadcast: () -> Unit,
     onCopy: () -> Unit,
     onInfo: () -> Unit,
+    onDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // Rebroadcast our own message verbatim (same id/content), offered for 15 minutes after sending.
+    val canRebroadcast = !msg.incoming && msg.packetHex.isNotBlank() &&
+        (System.currentTimeMillis() - msg.timestampMs) < 15 * 60 * 1000L
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             Row(
@@ -792,12 +878,15 @@ private fun MessageActionsSheet(
                 }
             }
             HorizontalDivider()
-            ActionRow(Icons.AutoMirrored.Filled.Reply, "Reply", enabled = false) {}
+            ActionRow(Icons.AutoMirrored.Filled.Reply, "Reply", enabled = msg.text.isNotBlank(), onClick = onReply)
             ActionRow(Icons.AutoMirrored.Filled.Forward, "Forward", enabled = false) {}
+            if (canRebroadcast) {
+                ActionRow(Icons.Default.Campaign, "Rebroadcast", enabled = true, onClick = onRebroadcast)
+            }
             ActionRow(Icons.Default.ContentCopy, "Copy", enabled = msg.text.isNotBlank(), onClick = onCopy)
             ActionRow(Icons.Default.Done, "Select", enabled = false) {}
             ActionRow(Icons.Default.Info, "Info", enabled = true, onClick = onInfo)
-            ActionRow(Icons.Default.Delete, "Delete", enabled = false, destructive = true) {}
+            ActionRow(Icons.Default.Delete, "Delete", enabled = true, destructive = true, onClick = onDelete)
         }
     }
 }
@@ -924,6 +1013,7 @@ private fun MessageBubble(
     showAvatar: Boolean,
     senderIdenticonKey: String?,
     mentionResolved: (String) -> Boolean,
+    quoted: Message?,
     onChipClick: (String) -> Unit,
     onLongPress: () -> Unit,
     onClick: () -> Unit,
@@ -1024,8 +1114,18 @@ private fun MessageBubble(
                         modifier = if (onSenderClick != null) Modifier.clickable(onClick = onSenderClick) else Modifier,
                     )
                 }
+                // Quoted message this is a reply to (DMs). Prefer the snapshot stored on the row at
+                // ingest (always available); fall back to a still-loaded message. The tag stays hidden.
+                val quotedText = msg.replyToText.ifBlank { quoted?.let { stripReplyTag(it.text) }.orEmpty() }
+                if (quotedText.isNotBlank()) {
+                    val quotedSender = msg.replyToSender.ifBlank {
+                        quoted?.let { if (!it.incoming) "You" else it.senderName.ifBlank { senderLabel } }.orEmpty()
+                    }
+                    QuotedReply(senderName = quotedSender.ifBlank { "Message" }, snippet = quotedText, mine = mine)
+                    Spacer(Modifier.size(4.dp))
+                }
                 MessageContent(
-                    msg.text,
+                    stripReplyTag(msg.text),
                     enableMentions = isChannel,
                     onMentionClick = onMentionClick,
                     mentionResolved = mentionResolved,
@@ -1139,6 +1239,7 @@ private fun MessageInput(
     value: TextFieldValue,
     onChange: (TextFieldValue) -> Unit,
     fullScreen: Boolean,
+    focusRequester: FocusRequester,
     onEmoji: () -> Unit,
     onSend: () -> Unit,
 ) {
@@ -1157,7 +1258,7 @@ private fun MessageInput(
             OutlinedTextField(
                 value = value,
                 onValueChange = onChange,
-                modifier = Modifier.weight(1f).onPreviewKeyEvent { e ->
+                modifier = Modifier.weight(1f).focusRequester(focusRequester).onPreviewKeyEvent { e ->
                     // Enter sends; Shift+Enter inserts a newline at the cursor.
                     if (e.type == KeyEventType.KeyDown && e.key == Key.Enter) {
                         if (e.isShiftPressed) {
@@ -1177,6 +1278,66 @@ private fun MessageInput(
             IconButton(onClick = onSend, enabled = value.text.isNotBlank()) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
             }
+        }
+    }
+}
+
+/** The "you're replying to X" bar shown above the composer (DMs); an ✕ cancels the reply. */
+@Composable
+private fun ReplyPreviewBar(senderName: String, snippet: String, onCancel: () -> Unit) {
+    Surface(tonalElevation = 3.dp) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.width(3.dp).height(34.dp).clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Reply to $senderName",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    snippet,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel reply")
+            }
+        }
+    }
+}
+
+/** The quoted message rendered inside a reply bubble: an accent bar, the sender, and a one-line snippet. */
+@Composable
+private fun QuotedReply(senderName: String, snippet: String, mine: Boolean) {
+    val accent = if (mine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary
+    Row(
+        Modifier.clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(3.dp).height(28.dp).clip(RoundedCornerShape(2.dp)).background(accent))
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(senderName, style = MaterialTheme.typography.labelSmall, color = accent, fontWeight = FontWeight.SemiBold)
+            Text(
+                snippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1324,3 +1485,4 @@ fun insertMention(draft: String, name: String): String =
         val lead = if (m.value.startsWith("@")) "" else m.value.take(1)
         "$lead@[$name] "
     }
+
