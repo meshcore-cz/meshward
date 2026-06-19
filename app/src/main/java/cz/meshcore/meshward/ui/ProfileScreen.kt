@@ -45,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -322,10 +323,30 @@ fun ProfileScreen(
                     }
                 }
 
-                // MeshCore section: bridged-network facts and the last ADVERT we heard.
-                if (profile.isMeshCore) {
+                // MeshCore section: the "Allow MeshCore" routing toggle (for any saved contact, so it
+                // can be turned on) plus, for a MeshCore contact, bridged-network facts.
+                val canToggleMeshCore = !profile.isSelf && profile.isContact && profile.pubKeyHex.isNotBlank()
+                if (canToggleMeshCore || profile.isMeshCore) {
                     Spacer(Modifier.size(24.dp))
                     ProfileSection("MeshCore") {
+                        if (canToggleMeshCore) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Allow MeshCore", style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        "Reach this contact over the MeshCore bridge",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = profile.isMeshCore,
+                                    onCheckedChange = { vm.setContactMeshCore(profile.nodeHex, it) },
+                                )
+                            }
+                        }
+                        // Bridged-network facts only apply once this is actually a MeshCore contact.
+                        if (profile.isMeshCore) {
                         if (profile.networkCode.isNotBlank()) {
                             Row(
                                 Modifier.fillMaxWidth().clickable { onOpenNetworkDetail(profile.networkCode) },
@@ -359,6 +380,7 @@ fun ProfileScreen(
                             AnnouncementRow("Path learned", formatRelativeAge(p.timestampMs, nowMs)) {
                                 showPathPacket = vm.decodeMeshCorePacketRaw(p.packetHex, p.timestampMs)
                             }
+                        }
                         }
                     }
                 }

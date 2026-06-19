@@ -2142,6 +2142,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * the same in Chats, so deleting one deletes the other (the node can be re-discovered in
      * Explore). See also [deleteChat].
      */
+    /** Toggles whether a contact is reached over the MeshCore bridge (sends DMs as MeshCore TXT_MSG). */
+    fun setContactMeshCore(nodeHex: String, enabled: Boolean) {
+        viewModelScope.launch { dao.setContactMeshCore(nodeHex, enabled) }
+    }
+
     fun deleteContact(nodeHex: String) {
         viewModelScope.launch {
             dao.deleteContact(nodeHex)

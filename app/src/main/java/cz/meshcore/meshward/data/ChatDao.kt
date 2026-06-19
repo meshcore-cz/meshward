@@ -39,6 +39,10 @@ interface ChatDao {
     @Query("UPDATE contacts SET isMeshCore = 1 WHERE nodeHex = :nodeHex AND isMeshCore = 0")
     suspend fun markContactMeshCore(nodeHex: String)
 
+    /** Manual override of the MeshCore-routing flag from the contact's profile. */
+    @Query("UPDATE contacts SET isMeshCore = :enabled WHERE nodeHex = :nodeHex")
+    suspend fun setContactMeshCore(nodeHex: String, enabled: Boolean)
+
     @Query("DELETE FROM contacts WHERE nodeHex = :nodeHex")
     suspend fun deleteContact(nodeHex: String)
 
